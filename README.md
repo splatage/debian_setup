@@ -15,7 +15,7 @@ This script automates the installation of **Debian 12 (Bookworm)** with **ZFS on
 ## 🌀 Quick Start (Live Debian Shell)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/YOUR_USERNAME/zfs-debian-bootstrap/main/bootstrap.sh -o bootstrap.sh
+curl -fsSL https://raw.githubusercontent.com/splatage/zfs-debian-bootstrap/main/bootstrap.sh -o bootstrap.sh
 chmod +x bootstrap.sh
 sudo ./bootstrap.sh
 ```
