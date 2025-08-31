@@ -2,50 +2,34 @@
 set -euo pipefail
 
 echo "=================================================================="
-echo "🔧 Post-Boot Performance Hardening (from tb-perf-tuning)"
+echo "🔧 Post-Boot Performance Hardening (tb-perf-tuning)"
 echo "=================================================================="
-echo "Stage: 2.1 — Integrated installer aligned with original repo semantics."
+echo "Stage 2 — Monolithic setup script (flat bootstrap form)."
 echo
 
 if [[ $EUID -ne 0 ]]; then
   echo "Please run as root."; exit 1
 fi
 
-# --- prompt helper (works with 'curl | bash') ---
+# Prompt for PROFILE interactively from /dev/tty
 prompt_tty() {
-  local var="$1" prompt="$2" def="$3"
-  local inp=""
-  if [[ -n "${!var:-}" ]]; then
-    printf -v "$var" '%s' "${!var}"
-    return 0
-  fi
+  local var="$1" prompt="$2" def="$3" val=""
   if [[ -e /dev/tty ]]; then
-    read -r -p "$prompt" inp < /dev/tty || true
+    read -r -p "$prompt" val < /dev/tty || true
   else
-    read -r -p "$prompt" inp || true
+    read -r -p "$prompt" val || true
   fi
-  inp="${inp:-$def}"
-  printf -v "$var" '%s' "$inp"
+  val="${val:-$def}"
+  printf -v "$var" '%s' "$val"
 }
 
-# --- Profile selection consistent with original repo ---
-# Original /etc/default/tune-bond uses PROFILE="auto" by default.
-PROFILE_NAME="${PROFILE_NAME:-}"
-if [[ -z "${PROFILE_NAME}" && -z "${TUNE_NONINTERACTIVE:-}" ]]; then
-  echo "Set profile value for /etc/default/tune-bond (original default: auto)"
-  echo "  - Enter 'auto' to use repo defaults"
-  echo "  - Enter any custom string to mark your own profile name"
-  echo "  - Leave blank to accept 'auto'"
-  prompt_tty PROFILE_NAME "PROFILE [auto]: " "auto"
-fi
-PROFILE_NAME="${PROFILE_NAME:-auto}"
-echo "✅ PROFILE will be set to: $PROFILE_NAME"
+prompt_tty PROFILE_NAME "Enter tuning PROFILE (e.g. auto): " "auto"
+echo "✅ PROFILE set to: $PROFILE_NAME"
 echo
 
-# --- Write /etc/default/tune-bond with injected PROFILE ---
-echo "📄 Installing /etc/default/tune-bond..."
+# Write default config with injected PROFILE
 install -d -m 0755 -o root -g root /etc/default
-install -m 0644 -o root -g root /dev/stdin /etc/default/tune-bond <<'__EOF_DEFAULT__'
+install -m 0644 /dev/stdin /etc/default/tune-bond <<'__EOF__'
 # Default tunables for tb-perf-tuning (edited by installer)
 PROFILE="auto"
 ENABLE_NIC_TUNING="true"
@@ -63,20 +47,15 @@ TCP_CC_OVERRIDE=""
 DISABLE_THP="true"
 LOCAL_VER_TOKEN_TTL_MS="75"
 
-__EOF_DEFAULT__
+__EOF__
 
-# Replace or append PROFILE= in-place to avoid divergence
-if grep -q '^PROFILE=' /etc/default/tune-bond; then
-  sed -i -E 's|^PROFILE=.*$|PROFILE="{PROFILE_NAME}"|' /etc/default/tune-bond
-else
-  printf '\nPROFILE="{PROFILE_NAME}"\n' >> /etc/default/tune-bond
-fi
-sed -i "s/{PROFILE_NAME}/${PROFILE_NAME}/g" /etc/default/tune-bond || true
+# Inject PROFILE value
+sed -i -E 's|^PROFILE=.*$|PROFILE="{PROFILE_NAME}"|' /etc/default/tune-bond
+sed -i "s/{PROFILE_NAME}/${PROFILE_NAME}/g" /etc/default/tune-bond
 
-# --- Sysctl & limits from repo ---
-echo "📄 Writing sysctl + limits configs..."
-install -d -m 0755 -o root -g root /etc/sysctl.d
-install -m 0644 -o root -g root /dev/stdin /etc/sysctl.d/97-security-hardening.conf <<'__EOF_SHARD__'
+# Install sysctl and limits configs
+install -d -m 0755 /etc/sysctl.d /etc/security/limits.d
+install -m 0644 /dev/stdin /etc/sysctl.d/97-security-hardening.conf <<'__EOF__'
 # Security hardening
 kernel.kptr_restrict = 2
 kernel.unprivileged_bpf_disabled = 1
@@ -93,9 +72,9 @@ net.ipv4.conf.default.accept_source_route = 0
 net.ipv6.conf.all.accept_ra = 0
 net.ipv6.conf.default.accept_ra = 0
 
-__EOF_SHARD__
+__EOF__
 
-install -m 0644 -o root -g root /dev/stdin /etc/sysctl.d/99-perf-base.conf <<'__EOF_SBASE__'
+install -m 0644 /dev/stdin /etc/sysctl.d/99-perf-base.conf <<'__EOF__'
 # Base performance hints
 net.core.default_qdisc = fq
 net.core.netdev_max_backlog = 16384
@@ -106,26 +85,24 @@ net.ipv4.tcp_mtu_probing = 1
 net.ipv4.tcp_syncookies = 0
 net.ipv4.tcp_timestamps = 1
 
-__EOF_SBASE__
+__EOF__
 
-install -m 0644 -o root -g root /dev/stdin /etc/sysctl.d/99-perf-memory.conf <<'__EOF_SMEM__'
+install -m 0644 /dev/stdin /etc/sysctl.d/99-perf-memory.conf <<'__EOF__'
 vm.swappiness = 10
 vm.dirty_background_ratio = 5
 vm.dirty_ratio = 20
 
-__EOF_SMEM__
+__EOF__
 
-install -d -m 0755 -o root -g root /etc/security/limits.d
-install -m 0644 -o root -g root /dev/stdin /etc/security/limits.d/99-perf.conf <<'__EOF_LIM__'
+install -m 0644 /dev/stdin /etc/security/limits.d/99-perf.conf <<'__EOF__'
 * soft nofile 1048576
 * hard nofile 1048576
 
-__EOF_LIM__
+__EOF__
 
-# --- Install scripts from repo ---
-echo "📄 Installing tune scripts..."
-install -d -m 0755 -o root -g root /usr/sbin
-install -m 0755 -o root -g root /dev/stdin /usr/sbin/tune-bond <<'__EOF_TB__'
+# Install binary scripts
+install -d -m 0755 /usr/sbin
+install -m 0755 /dev/stdin /usr/sbin/tune-bond <<'__EOF__'
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -216,9 +193,9 @@ fi
 
 exit 0
 
-__EOF_TB__
+__EOF__
 
-install -m 0755 -o root -g root /dev/stdin /usr/sbin/tune-sysctl <<'__EOF_TS__'
+install -m 0755 /dev/stdin /usr/sbin/tune-sysctl <<'__EOF__'
 #!/bin/bash
 set -euo pipefail
 
@@ -307,11 +284,11 @@ EOF
 # Apply just our file, then let the system aggregate
 sysctl -q -p "$OUT" || true
 
-__EOF_TS__
+__EOF__
 
-# --- Systemd units + overrides from repo ---
-echo "📄 Installing systemd units + overrides..."
-install -m 0644 -o root -g root /dev/stdin /etc/systemd/system/disable-thp.service <<'__EOF_THP__'
+# Install systemd units
+install -d -m 0755 /etc/systemd/system
+install -m 0644 /dev/stdin /etc/systemd/system/disable-thp.service <<'__EOF__'
 [Unit]
 Description=Disable Transparent Huge Pages
 DefaultDependencies=no
@@ -325,9 +302,9 @@ ExecStart=/bin/sh -c 'for p in /sys/kernel/mm/transparent_hugepage/enabled /sys/
 [Install]
 WantedBy=multi-user.target
 
-__EOF_THP__
+__EOF__
 
-install -m 0644 -o root -g root /dev/stdin /etc/systemd/system/tune-bond.service <<'__EOF_SVCB__'
+install -m 0644 /dev/stdin /etc/systemd/system/tune-bond.service <<'__EOF__'
 [Unit]
 Description=Apply tb-perf-tuning NIC/bond tuning
 After=network-online.target
@@ -340,9 +317,9 @@ ExecStart=/usr/sbin/tune-bond
 [Install]
 WantedBy=multi-user.target
 
-__EOF_SVCB__
+__EOF__
 
-install -m 0644 -o root -g root /dev/stdin /etc/systemd/system/tune-sysctl.service <<'__EOF_SVCS__'
+install -m 0644 /dev/stdin /etc/systemd/system/tune-sysctl.service <<'__EOF__'
 [Unit]
 Description=Apply tb-perf-tuning sysctl autoprofile
 After=network-online.target
@@ -355,26 +332,27 @@ ExecStart=/usr/sbin/tune-sysctl
 [Install]
 WantedBy=multi-user.target
 
-__EOF_SVCS__
+__EOF__
 
-install -d -m 0755 -o root -g root /etc/systemd/system/redis-server.service.d
-install -m 0644 -o root -g root /dev/stdin /etc/systemd/system/redis-server.service.d/override.conf <<'__EOF_R_OVR__'
+# Install overrides
+install -d -m 0755 /etc/systemd/system/redis-server.service.d
+install -m 0644 /dev/stdin /etc/systemd/system/redis-server.service.d/override.conf <<'__EOF__'
 [Service]
 LimitNOFILE=1048576
 IOWeight=1000
 
-__EOF_R_OVR__
+__EOF__
 
-install -d -m 0755 -o root -g root /etc/systemd/system/mariadb.service.d
-install -m 0644 -o root -g root /dev/stdin /etc/systemd/system/mariadb.service.d/override.conf <<'__EOF_M_OVR__'
+install -d -m 0755 /etc/systemd/system/mariadb.service.d
+install -m 0644 /dev/stdin /etc/systemd/system/mariadb.service.d/override.conf <<'__EOF__'
 [Service]
 LimitNOFILE=1048576
 IOSchedulingPriority=2
 
-__EOF_M_OVR__
+__EOF__
 
-# --- Reload and enable ---
-echo "🔄 Reloading systemd and enabling services..."
+# Enable systemd services
+echo "🔄 Reloading and enabling services..."
 systemctl daemon-reexec
 systemctl daemon-reload
 systemctl enable disable-thp.service
@@ -382,6 +360,5 @@ systemctl enable tune-sysctl.service
 systemctl enable tune-bond.service
 
 echo
-echo "✅ Stage 2.1 done: repo-aligned installer written."
-echo "   PROFILE="${PROFILE_NAME}" in /etc/default/tune-bond"
-echo "   You can start services now or reboot."
+echo "✅ Done. PROFILE: $PROFILE_NAME"
+echo "Reboot recommended to apply all changes."
