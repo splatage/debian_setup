@@ -2,54 +2,77 @@
 #
 # MariaDB Primary/Multi-Replica Controller Script
 #
-# This script orchestrates the setup and management of a MariaDB primary/replica cluster.
-# It is designed to be run from the PRIMARY server (or an admin host) and configures
-# REPLICA servers remotely via SSH.
+# This script orchestrates the setup and management of a MariaDB primary/replica
+# cluster. It is designed to be run from a dedicated controller (admin
+# workstation/bastion) and configures the PRIMARY and REPLICA servers remotely
+# via SSH.
 #
-# Features:
-#   - Manages multiple replicas.
-#   - Can provision replicas individually.
-#   - Includes a credential rotation ('re-auth') function.
-#   - Includes a live role switchover function (for single-replica scenarios).
+# This script strictly adheres to the Google Shell Style Guide.
+#
+# PREREQUISITES:
+#   - The controller machine must have passwordless SSH (key-based) access as
+#     'root' to the PRIMARY and ALL REPLICA servers.
 #
 
 set -euo pipefail
 
 # --- !! CONFIGURE THESE VARIABLES !! ---
 readonly PRIMARY_IP="192.168.1.221"
-# Add all replica IPs to this array
+# Add all replica IPs to this array.
 readonly REPLICA_IP_LIST=(
-    "192.168.1.223"
-    "192.168.1.224"
-    # "192.168.1.225"
+  "192.168.1.223"
+  "192.168.1.224"
 )
-readonly REPLICA_SSH_USER="root" # User on the replica with root/sudo access
+# All remote operations will be performed as this user.
+readonly SSH_USER="root"
 
 # The MariaDB replication user. The password will be prompted for securely.
 readonly REPL_USER="repl"
 
-# ZFS and MariaDB settings (assuming they are uniform)
-readonly ZFS_DEVICE="/dev/nvme0n1" # Device for ZFS pool on the target server
+# ZFS and MariaDB settings (assuming they are uniform across all nodes).
+readonly ZFS_DEVICE="/dev/nvme0n1"
 readonly ZFS_POOL_NAME="mariadb_data"
 readonly MARIADB_BASE_DIR="/var/lib/mysql"
 readonly BACKUP_BASE_DIR="${MARIADB_BASE_DIR}/backups"
 # --- END OF CONFIGURATION ---
 
 # --- Helper Functions ---
-c_bold=$(tput bold)
-c_green=$(tput setaf 2)
-c_yellow=$(tput setaf 3)
-c_reset=$(tput sgr0)
-info() { echo -e "${c_bold}INFO:${c_reset} $1"; }
-warn() { echo -e "${c_yellow}${c_bold}WARN:${c_reset} $1"; }
-success() { echo -e "${c_green}${c_bold}SUCCESS:${c_reset} $1"; }
+readonly C_BOLD=$(tput bold)
+readonly C_GREEN=$(tput setaf 2)
+readonly C_YELLOW=$(tput setaf 3)
+readonly C_RESET=$(tput sgr0)
 
-# --- CORE FUNCTIONS ---
+# Prints an informational message.
+# Args:
+#   $1: The message string to print.
+info() {
+  echo -e "${C_BOLD}INFO:${C_RESET} ${1}"
+}
 
+# Prints a warning message.
+# Args:
+#   $1: The message string to print.
+warn() {
+  echo -e "${C_YELLOW}${C_BOLD}WARN:${C_RESET} ${1}"
+}
+
+# Prints a success message.
+# Args:
+#   $1: The message string to print.
+success() {
+  echo -e "${C_GREEN}${C_BOLD}SUCCESS:${C_RESET} ${1}"
+}
+
+#######################################
+# Retrieves the full MariaDB configuration template.
+# This function uses a heredoc to store the complete, unmodified config.
+# Globals:
+#   None
+# Outputs:
+#   Writes the configuration template string to stdout.
+#######################################
 get_config_template() {
-    # This heredoc contains your full, unmodified configuration template.
-    # Placeholders like {{ROLE}}, {{SERVER_ID}}, {{BIND_IP}} will be replaced.
-    cat << 'EOF'
+  cat << 'EOF'
 [mariadbd]
 
 #################################################################
@@ -165,51 +188,68 @@ query-response-time-stats     = 1
 EOF
 }
 
+#######################################
+# Remotely configures a single node with ZFS and MariaDB.
+# Uses SSH heredocs to perform setup, installation, and configuration.
+# Globals:
+#   SSH_USER
+#   ZFS_POOL_NAME, ZFS_DEVICE, MARIADB_BASE_DIR
+# Args:
+#   $1: The IP address of the node to configure.
+#   $2: The role of the node ('Primary' or 'Replica').
+#######################################
 configure_node() {
-    local node_ip=$1
-    local role=$2 # Primary or Replica
-    local ssh_user=$3
+  local node_ip="${1}"
+  local role="${2}"
+  info "Configuring node ${node_ip} as a ${role}..."
 
-    info "Configuring node ${node_ip} as a ${role}..."
+  local server_id
+  server_id=$(echo "${node_ip}" | awk -F. '{printf "%d%03d", $3, $4}')
 
-    local server_id
-    server_id=$(echo "$node_ip" | awk -F. '{printf "%d%03d", $3, $4}')
+  local bind_ip
+  if [[ "${role}" == "Replica" ]]; then
+    bind_ip="127.0.0.1"
+    info "Role is Replica, setting bind-address to localhost."
+  else
+    bind_ip="${node_ip}"
+  fi
 
-    local bind_ip
-    if [ "$role" = "Replica" ]; then
-        bind_ip="127.0.0.1"
-        info "Role is Replica, setting bind-address to localhost."
-    else
-        bind_ip="$node_ip"
-    fi
+  local config_content
+  config_content=$(get_config_template | \
+    sed "s/{{ROLE}}/${role}/g" | \
+    sed "s/{{SERVER_ID}}/${server_id}/g" | \
+    sed "s/{{BIND_IP}}/${bind_ip}/g")
 
-    local config_content
-    config_content=$(get_config_template | \
-        sed "s/{{ROLE}}/${role}/g" | \
-        sed "s/{{SERVER_ID}}/${server_id}/g" | \
-        sed "s/{{BIND_IP}}/${bind_ip}/g")
+  if [[ "${role}" == "Primary" ]]; then
+    config_content=$(echo "${config_content}" | \
+      sed -e '/## PRIMARY/,/## Replica/{ s/^# //; }')
+  else
+    config_content=$(echo "${config_content}" | \
+      sed -e '/## Replica/,/##################################################################/{ s/^# //; }')
+  fi
 
-    if [ "$role" = "Primary" ]; then
-        config_content=$(echo "$config_content" | sed -e '/## PRIMARY/,/## Replica/{ s/^# //; }')
-    else
-        config_content=$(echo "$config_content" | sed -e '/## Replica/,/##################################################################/{ s/^# //; }')
-    fi
-    
-    ssh "${ssh_user}@${node_ip}" "bash -s" -- << EOF
+  ssh "${SSH_USER}@${node_ip}" "bash -s" -- << EOF
 set -e
+# Define local helper functions for the remote script
 info() { echo "[REMOTE] INFO: \$1"; }
 warn() { echo "[REMOTE] WARN: \$1"; }
 success() { echo "[REMOTE] SUCCESS: \$1"; }
 
 info "Running initial setup on ${node_ip}"
-zpool list ${ZFS_POOL_NAME} &>/dev/null || {
-    info "Creating ZFS pool ${ZFS_POOL_NAME} on ${ZFS_DEVICE}"
-    zpool create ${ZFS_POOL_NAME} ${ZFS_DEVICE} -f
-}
-zfs set mountpoint=${MARIADB_BASE_DIR} ${ZFS_POOL_NAME}
-zfs set compression=lz4 atime=off logbias=throughput ${ZFS_POOL_NAME}
-zfs create -o mountpoint=${MARIADB_BASE_DIR}/data -o recordsize=16k -o primarycache=metadata ${ZFS_POOL_NAME}/data 2>/dev/null || warn "Data dataset exists."
-zfs create -o mountpoint=${MARIADB_BASE_DIR}/log ${ZFS_POOL_NAME}/log 2>/dev/null || warn "Log dataset exists."
+if zpool list "${ZFS_POOL_NAME}" &>/dev/null; then
+  warn "ZFS pool '${ZFS_POOL_NAME}' already exists. Skipping creation."
+else
+  info "Creating ZFS pool ${ZFS_POOL_NAME} on ${ZFS_DEVICE}"
+  zpool create "${ZFS_POOL_NAME}" "${ZFS_DEVICE}" -f
+fi
+
+zfs set mountpoint="${MARIADB_BASE_DIR}" "${ZFS_POOL_NAME}"
+zfs set compression=lz4 atime=off logbias=throughput "${ZFS_POOL_NAME}"
+zfs create -o mountpoint="${MARIADB_BASE_DIR}/data" \
+  -o recordsize=16k -o primarycache=metadata \
+  "${ZFS_POOL_NAME}/data" 2>/dev/null || warn "Data dataset exists."
+zfs create -o mountpoint="${MARIADB_BASE_DIR}/log" \
+  "${ZFS_POOL_NAME}/log" 2>/dev/null || warn "Log dataset exists."
 success "ZFS setup complete."
 
 info "Installing MariaDB..."
@@ -230,64 +270,97 @@ ${config_content}
 CONFIG_EOF
 
 if [ ! -d "${MARIADB_BASE_DIR}/data/mysql" ]; then
-    info "Initializing new MariaDB data directory..."
-    mariadb-install-db --user=mysql --datadir="${MARIADB_BASE_DIR}/data"
+  info "Initializing new MariaDB data directory..."
+  mariadb-install-db --user=mysql --datadir="${MARIADB_BASE_DIR}/data"
 fi
-chown -R mysql:mysql ${MARIADB_BASE_DIR}
+chown -R mysql:mysql "${MARIADB_BASE_DIR}"
 systemctl start mariadb
 success "Node ${node_ip} successfully configured as a ${role}."
 EOF
 }
 
+#######################################
+# Seeds a chosen replica with a fresh backup from the primary.
+# Wipes the target replica's data and replaces it with a new snapshot.
+# Handles password transport securely using Base64.
+# Globals:
+#   REPLICA_IP_LIST, PRIMARY_IP, SSH_USER, REPL_USER, BACKUP_BASE_DIR
+#   MARIADB_BASE_DIR
+# Args:
+#   None
+#######################################
 seed_replica() {
-    info "Which replica do you want to seed?"
-    PS3="Please choose a target replica: "
-    select target_replica_ip in "${REPLICA_IP_LIST[@]}"; do
-        if [[ -n "$target_replica_ip" ]]; then break; else echo "Invalid selection."; fi
-    done
+  info "Which replica do you want to seed?"
+  PS3="Please choose a target replica: "
+  select target_replica_ip in "${REPLICA_IP_LIST[@]}"; do
+    if [[ -n "${target_replica_ip}" ]]; then
+      break
+    else
+      echo "Invalid selection."
+    fi
+  done
+  info "Starting seed from PRIMARY (${PRIMARY_IP}) to REPLICA (${target_replica_ip})."
 
-    info "Starting replica seed from PRIMARY (${PRIMARY_IP}) to REPLICA (${target_replica_ip})."
-    
-    read -sp "Enter the password for the '${REPL_USER}' replication user: " REPL_PASSWORD
-    echo ""
-    if [ -z "$REPL_PASSWORD" ]; then echo "Error: Password cannot be empty." >&2; exit 1; fi
+  local repl_password
+  read -sp "Enter the password for the '${REPL_USER}' replication user: " \
+    repl_password
+  echo ""
+  if [[ -z "${repl_password}" ]]; then
+    echo "Error: Password cannot be empty." >&2
+    exit 1
+  fi
+  local repl_password_b64
+  repl_password_b64=$(echo -n "${repl_password}" | base64)
 
-    info "Step 1: Ensuring replication user '${REPL_USER}' exists on Primary..."
-    mariadb -e "CREATE OR REPLACE USER '${REPL_USER}'@'%' IDENTIFIED BY '${REPL_PASSWORD}'; GRANT REPLICATION SLAVE ON *.* TO '${REPL_USER}'@'%'; FLUSH PRIVILEGES;"
-    success "Replication user configured."
+  info "Step 1: Ensuring replication user '${REPL_USER}' exists on Primary..."
+  ssh "${SSH_USER}@${PRIMARY_IP}" "bash -s" -- << EOF
+set -e
+readonly DECODED_PASSWORD="\$(echo '${repl_password_b64}' | base64 -d)"
+cat << SQL | mariadb
+CREATE OR REPLACE USER '${REPL_USER}'@'%' IDENTIFIED BY '\${DECODED_PASSWORD}';
+GRANT REPLICATION SLAVE ON *.* TO '${REPL_USER}'@'%';
+FLUSH PRIVILEGES;
+SQL
+EOF
+  success "Replication user configured on Primary."
 
-    local NOW
-    NOW=$(date +%F_%H-%M)
-    local BACKDIR="${BACKUP_BASE_DIR}/backup-${NOW}"
-    mkdir -p "$BACKDIR"
-    
-    info "Step 2: Taking backup on Primary using mariabackup..."
-    mariabackup --backup --target-dir="$BACKDIR" --parallel=4
-    mariabackup --prepare --target-dir="$BACKDIR"
-    success "Backup created and prepared in ${BACKDIR}."
+  local now; now=$(date +%F_%H-%M)
+  local backdir="${BACKUP_BASE_DIR}/backup-${now}"
+  info "Step 2: Taking backup on Primary using mariabackup..."
+  ssh "${SSH_USER}@${PRIMARY_IP}" "bash -s" -- << EOF
+set -e
+mkdir -p '${backdir}'
+mariabackup --backup --target-dir='${backdir}' --parallel=4
+mariabackup --prepare --target-dir='${backdir}'
+EOF
+  success "Backup created and prepared on Primary in ${backdir}."
 
-    local GTID
-    GTID=$(awk '{print $3}' "$BACKDIR/mariadb_backup_binlog_info")
-    info "Captured GTID position for seeding: ${c_green}${c_bold}${GTID}${c_reset}"
+  local gtid
+  gtid=$(ssh "${SSH_USER}@${PRIMARY_IP}" "awk '{print \\\$3}' '${backdir}/mariadb_backup_binlog_info'")
+  info "Captured GTID position for seeding: ${C_GREEN}${C_BOLD}${gtid}${C_RESET}"
 
-    info "Step 3: Copying backup to Replica via rsync..."
-    rsync -auv --info=progress2 "$BACKDIR" "${REPLICA_SSH_USER}@${target_replica_ip}:${BACKUP_BASE_DIR}/"
-    success "Backup copied to replica."
-    
-    info "Step 4: Applying backup and configuring replication on Replica..."
-    ssh "${REPLICA_SSH_USER}@${target_replica_ip}" "bash -s" -- << EOF
+  info "Step 3: Copying backup from Primary to Replica via rsync..."
+  rsync -auv --info=progress2 -e ssh \
+    "${SSH_USER}@${PRIMARY_IP}:${backdir}" \
+    "${SSH_USER}@${target_replica_ip}:${BACKUP_BASE_DIR}/"
+  success "Backup copied to replica."
+  
+  info "Step 4: Applying backup and configuring replication on Replica..."
+  ssh "${SSH_USER}@${target_replica_ip}" "bash -s" -- << EOF
 set -e
 info() { echo "[REMOTE] INFO: \$1"; }
 success() { echo "[REMOTE] SUCCESS: \$1"; }
+readonly DECODED_PASSWORD="\$(echo '${repl_password_b64}' | base64 -d)"
 
 info "Stopping MariaDB service on replica..."
 systemctl stop mariadb
 
 info "Clearing existing data and log directories..."
-rm -rf "${MARIADB_BASE_DIR:?}/data/"* "${MARIADB_BASE_DIR:?}/log/"*
+rm -rf "${MARIADB_BASE_DIR:?}/data/"*
+rm -rf "${MARIADB_BASE_DIR:?}/log/"*
 
 info "Restoring from backup..."
-mariabackup --copy-back --target-dir="${BACKUP_BASE_DIR}/backup-${NOW}"
+mariabackup --copy-back --target-dir="${BACKUP_BASE_DIR}/backup-${now}"
 chown -R mysql:mysql "${MARIADB_BASE_DIR}"
 
 info "Starting MariaDB service..."
@@ -295,140 +368,254 @@ systemctl start mariadb
 success "Restore complete. MariaDB started."
 
 info "Configuring replication..."
-mariadb -e "
-    STOP SLAVE;
-    SET GLOBAL gtid_slave_pos='${GTID}';
-    CHANGE MASTER TO
-        MASTER_HOST='${PRIMARY_IP}',
-        MASTER_USER='${REPL_USER}',
-        MASTER_PASSWORD='${REPL_PASSWORD}',
-        MASTER_USE_GTID=slave_pos;
-    START SLAVE;
-"
+cat << SQL | mariadb
+STOP SLAVE;
+SET GLOBAL gtid_slave_pos='${gtid}';
+CHANGE MASTER TO
+    MASTER_HOST='${PRIMARY_IP}',
+    MASTER_USER='${REPL_USER}',
+    MASTER_PASSWORD='\${DECODED_PASSWORD}',
+    MASTER_USE_GTID=slave_pos;
+START SLAVE;
+SQL
 success "Replication configured and started."
 
 info "Verifying slave status (check for Yes/Yes):"
 mariadb -e "SHOW SLAVE STATUS\G"
 EOF
-    success "Replica seed process complete for ${target_replica_ip}."
+  success "Replica seed process complete for ${target_replica_ip}."
 }
 
+#######################################
+# Rotates the replication password on the primary and all configured replicas.
+# Globals:
+#   REPL_USER, PRIMARY_IP, SSH_USER, REPLICA_IP_LIST
+# Args:
+#   None
+#######################################
 re_auth_replicas() {
-    info "Starting replication credential rotation."
-    
-    read -sp "Enter the NEW password for the '${REPL_USER}' user: " NEW_REPL_PASSWORD
-    echo ""
-    if [ -z "$NEW_REPL_PASSWORD" ]; then echo "Error: Password cannot be empty." >&2; exit 1; fi
-    
-    info "Step 1: Updating password on the PRIMARY server..."
-    mariadb -e "CREATE OR REPLACE USER '${REPL_USER}'@'%' IDENTIFIED BY '${NEW_REPL_PASSWORD}'; GRANT REPLICATION SLAVE ON *.* TO '${REPL_USER}'@'%'; FLUSH PRIVILEGES;"
-    success "Password updated on Primary."
-    
-    info "Step 2: Rolling out new password to all replicas..."
-    for replica_ip in "${REPLICA_IP_LIST[@]}"; do
-        info "Updating replica ${replica_ip}..."
-        ssh "${REPLICA_SSH_USER}@${replica_ip}" "bash -s" -- << EOF
+  info "Starting replication credential rotation."
+  local new_repl_password
+  read -sp "Enter the NEW password for the '${REPL_USER}' user: " new_repl_password
+  echo ""
+  if [[ -z "${new_repl_password}" ]]; then
+    echo "Error: Password cannot be empty." >&2
+    exit 1
+  fi
+  local new_repl_password_b64
+  new_repl_password_b64=$(echo -n "${new_repl_password}" | base64)
+  
+  info "Step 1: Updating password on the PRIMARY server..."
+  ssh "${SSH_USER}@${PRIMARY_IP}" "bash -s" -- << EOF
 set -e
-mariadb -e "
-    STOP SLAVE;
-    CHANGE MASTER TO MASTER_PASSWORD='${NEW_REPL_PASSWORD}';
-    START SLAVE;
-"
+readonly DECODED_PASSWORD="\$(echo '${new_repl_password_b64}' | base64 -d)"
+cat << SQL | mariadb
+CREATE OR REPLACE USER '${REPL_USER}'@'%' IDENTIFIED BY '\${DECODED_PASSWORD}';
+GRANT REPLICATION SLAVE ON *.* TO '${REPL_USER}'@'%';
+FLUSH PRIVILEGES;
+SQL
 EOF
-        success "Replica ${replica_ip} updated."
-    done
-    
-    success "Credential rotation complete for all replicas."
+  success "Password updated on Primary."
+  
+  info "Step 2: Rolling out new password to all replicas..."
+  for replica_ip in "${REPLICA_IP_LIST[@]}"; do
+    info "Updating replica ${replica_ip}..."
+    ssh "${SSH_USER}@${replica_ip}" "bash -s" -- << EOF
+set -e
+readonly DECODED_PASSWORD="\$(echo '${new_repl_password_b64}' | base64 -d)"
+cat << SQL | mariadb
+STOP SLAVE;
+CHANGE MASTER TO MASTER_PASSWORD='\${DECODED_PASSWORD}';
+START SLAVE;
+SQL
+EOF
+    success "Replica ${replica_ip} updated."
+  done
+  success "Credential rotation complete for all replicas."
 }
 
+#######################################
+# Performs a live role switchover between the primary and a chosen replica.
+# Promotes the replica and demotes the primary, re-pointing other replicas.
+# Globals:
+#   REPLICA_IP_LIST, REPL_USER, PRIMARY_IP, SSH_USER
+# Args:
+#   None
+#######################################
 switchover_roles() {
-    if [ ${#REPLICA_IP_LIST[@]} -ne 1 ]; then
-        warn "Switchover is designed for a simple Primary <-> single Replica scenario."
-        warn "You have multiple replicas configured. This automated switchover is disabled."
-        exit 1
+  info "Which replica do you want to promote to be the new Primary?"
+  PS3="Please choose a target replica: "
+  select promoted_replica_ip in "${REPLICA_IP_LIST[@]}"; do
+    if [[ -n "${promoted_replica_ip}" ]]; then
+      break
+    else
+      echo "Invalid selection."
     fi
-    local target_replica_ip=${REPLICA_IP_LIST[0]}
-    read -sp "Enter the password for the '${REPL_USER}' replication user: " REPL_PASSWORD
-    echo ""
+  done
 
-    warn "!!! STARTING LIVE ROLE SWITCHOVER !!!"
-    warn "This will promote ${target_replica_ip} to Primary and demote ${PRIMARY_IP} to Replica."
-    read -rp "Are you sure you want to continue? [y/N]: " choice
-    if [[ ! "$choice" =~ ^[Yy]$ ]]; then echo "Aborting."; exit 0; fi
+  local other_replica_ips=()
+  for ip in "${REPLICA_IP_LIST[@]}"; do
+    if [[ "${ip}" != "${promoted_replica_ip}" ]]; then
+      other_replica_ips+=("${ip}")
+    fi
+  done
 
-    info "Step 1: Ensuring replica is fully synchronized..."
-    local behind=1; local count=0
-    while [[ $behind -ne 0 && $count -lt 60 ]]; do
-        behind=$(ssh "${REPLICA_SSH_USER}@${target_replica_ip}" "mariadb -e 'SHOW SLAVE STATUS\G'" | grep 'Seconds_Behind_Master:' | awk '{print $2}')
-        if [[ "$behind" == "0" ]]; then break; fi
-        echo "Replica is $behind seconds behind master. Waiting..."
-        sleep 1; ((count++))
+  local repl_password
+  read -sp "Enter the password for the '${REPL_USER}' replication user: " \
+    repl_password
+  echo ""
+  if [[ -z "${repl_password}" ]]; then
+    echo "Error: Password cannot be empty." >&2
+    exit 1
+  fi
+  local repl_password_b64
+  repl_password_b64=$(echo -n "${repl_password}" | base64)
+
+  warn "!!! STARTING LIVE ROLE SWITCHOVER !!!"
+  warn "  - This will PROMOTE  : ${promoted_replica_ip}"
+  warn "  - This will DEMOTE   : ${PRIMARY_IP}"
+  if [[ ${#other_replica_ips[@]} -gt 0 ]]; then
+    warn "  - This will RE-POINT : ${other_replica_ips[*]}"
+  fi
+
+  read -rp "Are you sure you want to continue? [y/N]: " choice
+  if [[ ! "${choice}" =~ ^[Yy]$ ]]; then
+    echo "Aborting."
+    exit 0
+  fi
+
+  info "Step 1: Ensuring ALL replicas are fully synchronized..."
+  for replica_ip in "${REPLICA_IP_LIST[@]}"; do
+    local behind=1
+    local count=0
+    info "Checking sync status of ${replica_ip}..."
+    while [[ ${behind} -ne 0 && ${count} -lt 60 ]]; do
+      behind=$(ssh "${SSH_USER}@${replica_ip}" \
+        "mariadb -e 'SHOW SLAVE STATUS\G'" | \
+        grep 'Seconds_Behind_Master:' | awk '{print $2}')
+      if [[ "${behind}" == "0" ]]; then
+        break
+      fi
+      echo "  - ${replica_ip} is ${behind} seconds behind master. Waiting..."
+      sleep 1
+      ((count++))
     done
-    if [[ $behind -ne 0 ]]; then echo "Error: Replica did not catch up. Aborting." >&2; exit 1; fi
-    success "Replica is fully synchronized."
+    if [[ ${behind} -ne 0 ]]; then
+      echo "Error: Replica ${replica_ip} did not catch up. Aborting." >&2
+      exit 1
+    fi
+    success "Replica ${replica_ip} is synchronized."
+  done
 
-    info "Step 2: Putting old Primary (${PRIMARY_IP}) into read-only mode..."
-    mariadb -e "SET GLOBAL read_only = ON; FLUSH TABLES WITH READ LOCK;"
-    success "Old Primary is now read-only."
+  info "Step 2: Putting old Primary (${PRIMARY_IP}) into read-only mode..."
+  ssh "${SSH_USER}@${PRIMARY_IP}" \
+    "mariadb -e 'SET GLOBAL read_only = ON; FLUSH TABLES WITH READ LOCK;'"
+  success "Old Primary is now read-only."
 
-    info "Step 3: Promoting Replica (${target_replica_ip}) to be the new Primary..."
-    ssh "${REPLICA_SSH_USER}@${target_replica_ip}" "mariadb -e 'STOP SLAVE; RESET MASTER; SET GLOBAL read_only = OFF;'"
-    success "New Primary is live. Point your applications to ${target_replica_ip} NOW."
+  info "Step 3: Promoting Replica (${promoted_replica_ip}) to be the new Primary..."
+  ssh "${SSH_USER}@${promoted_replica_ip}" \
+    "mariadb -e 'STOP SLAVE; RESET MASTER; SET GLOBAL read_only = OFF;'"
+  success "New Primary is live. Point applications to ${promoted_replica_ip} NOW."
 
-    info "Step 4: Reconfiguring old Primary (${PRIMARY_IP}) to replicate from new Primary..."
-    mariadb -e "
-        UNLOCK TABLES;
-        CHANGE MASTER TO
-            MASTER_HOST='${target_replica_ip}',
-            MASTER_USER='${REPL_USER}',
-            MASTER_PASSWORD='${REPL_PASSWORD}',
-            MASTER_USE_GTID=slave_pos;
-        START SLAVE;
-    "
-    success "Old Primary is now a replica of the new Primary."
+  info "Step 4: Reconfiguring old Primary (${PRIMARY_IP}) to new Primary..."
+  ssh "${SSH_USER}@${PRIMARY_IP}" "bash -s" -- << EOF
+set -e
+readonly DECODED_PASSWORD="\$(echo '${repl_password_b64}' | base64 -d)"
+cat << SQL | mariadb
+UNLOCK TABLES;
+CHANGE MASTER TO
+    MASTER_HOST='${promoted_replica_ip}',
+    MASTER_USER='${REPL_USER}',
+    MASTER_PASSWORD='\${DECODED_PASSWORD}',
+    MASTER_USE_GTID=slave_pos;
+START SLAVE;
+SQL
+EOF
+  success "Old Primary is now a replica of the new Primary."
 
-    info "Step 5: Verifying replication status on the new replica (${PRIMARY_IP})..."
-    mariadb -e "SHOW SLAVE STATUS\G"
-    
-    warn " SWITCHOVER COMPLETE. ROLES ARE NOW REVERSED. You MUST update this script's variables to reflect the new reality."
+  if [[ ${#other_replica_ips[@]} -gt 0 ]]; then
+    info "Step 5: Re-pointing all other replicas to the new Primary..."
+    for replica_ip in "${other_replica_ips[@]}"; do
+      info "  - Re-pointing ${replica_ip}..."
+      ssh "${SSH_USER}@${replica_ip}" "bash -s" -- << EOF
+set -e
+cat << SQL | mariadb
+STOP SLAVE;
+CHANGE MASTER TO MASTER_HOST='${promoted_replica_ip}';
+START SLAVE;
+SQL
+EOF
+      success "    Replica ${replica_ip} is now following ${promoted_replica_ip}."
+    done
+  fi
+
+  info "Step 6: Verifying replication status on all new replicas..."
+  info "--- Status for new replica ${PRIMARY_IP} ---"
+  ssh "${SSH_USER}@${PRIMARY_IP}" "mariadb -e 'SHOW SLAVE STATUS\G'"
+  for replica_ip in "${other_replica_ips[@]}"; do
+    info "--- Status for replica ${replica_ip} ---"
+    ssh "${SSH_USER}@${replica_ip}" "mariadb -e 'SHOW SLAVE STATUS\G'"
+  done
+  
+  warn " SWITCHOVER COMPLETE. ROLES ARE NOW RECONFIGURED."
+  warn "   - New Primary: ${promoted_replica_ip}"
+  warn "   - New Replicas: ${PRIMARY_IP} ${other_replica_ips[*]}"
+  warn "   - You MUST update this script's configuration variables"
+  warn "     (PRIMARY_IP, REPLICA_IP_LIST) to reflect the new reality"
+  warn "     before running it again."
 }
 
-# --- Main CLI Logic ---
-if [ -z "${1:-}" ]; then
+#######################################
+# Main execution logic for the script.
+# Parses command-line arguments and calls the appropriate function.
+# Globals:
+#   None
+# Args:
+#   $@: The command-line arguments passed to the script.
+#######################################
+main() {
+  if [[ -z "${1:-}" ]]; then
     echo "Usage: $0 --action <ACTION>"
     echo "Actions:"
-    echo "  setup-node        -- Interactively configure a node as Primary or Replica."
-    echo "  seed-replica      -- Wipes a chosen Replica and seeds it with a fresh backup from the Primary."
-    echo "  re-auth           -- Rotates the replication password on the Primary and all Replacas."
-    echo "  switchover        -- Promotes the Replica to Primary (only for single-replica setups)."
+    echo "  setup-node        -- Configure a node as Primary or Replica."
+    echo "  seed-replica      -- Wipes a chosen Replica and seeds it with a"
+    echo "                       fresh backup from the Primary."
+    echo "  re-auth           -- Rotates the replication password on the Primary"
+    echo "                       and all Replicas."
+    echo "  switchover        -- Interactively promotes a chosen Replica to be the"
+    echo "                       new Primary."
     exit 1
-fi
-
-case "$1" in
+  fi
+  case "${1}" in
     --action)
-        case "${2:-}" in
-            setup-node)
-                read -rp "Enter IP of the node to set up: " node_ip
-                read -rp "Enter role for this node (Primary/Replica): " node_role
-                configure_node "$node_ip" "$node_role" "$REPLICA_SSH_USER"
-                ;;
-            seed-replica)
-                seed_replica
-                ;;
-            re-auth)
-                re_auth_replicas
-                ;;
-            switchover)
-                switchover_roles
-                ;;
-            *)
-                echo "Error: Unknown action '$2'" >&2
-                exit 1
-                ;;
-        esac
-        ;;
+      case "${2:-}" in
+        setup-node)
+          local node_ip
+          local node_role
+          read -rp "Enter IP of the node to set up: " node_ip
+          read -rp "Enter role for this node (Primary/Replica): " node_role
+          configure_node "${node_ip}" "${node_role}"
+          ;;
+        seed-replica)
+          seed_replica
+          ;;
+        re-auth)
+          re_auth_replicas
+          ;;
+        switchover)
+          switchover_roles
+          ;;
+        *)
+          echo "Error: Unknown action '${2:-}'" >&2
+          exit 1
+          ;;
+      esac
+      ;;
     *)
-        echo "Error: Unknown argument '$1'" >&2
-        exit 1
-        ;;
-esac
+      echo "Error: Unknown argument '${1}'" >&2
+      exit 1
+      ;;
+  esac
+}
+
+main "$@"
