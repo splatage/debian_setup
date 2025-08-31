@@ -15,12 +15,8 @@ This script automates the installation of **Debian 12 (Bookworm)** with **ZFS on
 ## 🌀 Quick Start (Live Debian Shell)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/splatage/zfs-debian-bootstrap/main/bootstrap.sh -o bootstrap.sh
-chmod +x bootstrap.sh
-sudo ./bootstrap.sh
+curl https://raw.githubusercontent.com/splatage/debian_setup/refs/heads/main/debian_zfs_install.sh | bash
 ```
-
-> Replace `YOUR_USERNAME` and branch name if different.
 
 ---
 
@@ -45,29 +41,6 @@ sudo ./bootstrap.sh
   - 🔐 Key-only login
   - 🔐 No password or interactive auth
 - SSH daemon hardened via `/etc/ssh/sshd_config.d/`
-- UFW not installed by default (manual)
-
----
-
-## 🔧 Requirements
-
-- A live Debian or rescue environment with:
-  - `zfsutils-linux`
-  - `debootstrap`
-  - `gdisk`, `sgdisk`, `curl`, `wget`
-- Internet access
-- At least one block device (for single or mirrored install)
-
----
-
-## 🔗 Related Files
-
-All files are stored flat for easy `curl`-based access or embedded in heredocs:
-
-- `bootstrap.sh` — Main installer (entrypoint)
-- `root_authorized_keys` — SSH key used for root login
-- `zfs-import-bpool.service` — systemd drop-in for bpool import
-- `sshd_config_dropin.conf` — SSH hardening config
 
 ---
 
