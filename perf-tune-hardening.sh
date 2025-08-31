@@ -4,7 +4,8 @@
 #
 # This self-contained script applies system-wide performance tuning and optional
 # SSH hardening. It is designed to be fully interactive and idempotent.
-# It includes fixes for interactivity and variable assignment.
+#
+# v3: Fixes "Invalid argument" for sysctl tcp_wmem/rmem settings.
 #
 # Usage:
 #   - Interactive Install: sudo bash -c "$(curl -sSL <URL_TO_SCRIPT>)"
@@ -38,7 +39,6 @@ check_dependencies() {
 }
 
 # --- Profile Definitions ---
-# Each function defines the tuning parameters for a specific profile.
 
 set_profile_auto() {
     echo "Selected Profile: auto (Balanced BBR)"
@@ -57,8 +57,8 @@ set_profile_lan_low_latency() {
     export QDISC="fq_codel"
     export SYSCTL_SETTINGS=(
         "net.ipv4.tcp_low_latency=1"
-        "net.ipv4.tcp_wmem='4096 16384 4194304'"
-        "net.ipv4.tcp_rmem='4096 87380 6291456'"
+        "net.ipv4.tcp_wmem=4096 16384 4194304" # <<< FIXED
+        "net.ipv4.tcp_rmem=4096 87380 6291456"  # <<< FIXED
         "net.core.netdev_max_backlog=16384"
         "net.core.somaxconn=8192"
     )
@@ -71,8 +71,8 @@ set_profile_wan_throughput() {
     export SYSCTL_SETTINGS=(
         "net.core.rmem_max=16777216"
         "net.core.wmem_max=16777216"
-        "net.ipv4.tcp_rmem='4096 131072 16777216'"
-        "net.ipv4.tcp_wmem='4096 16384 16777216'"
+        "net.ipv4.tcp_rmem=4096 131072 16777216"   # <<< FIXED
+        "net.ipv4.tcp_wmem=4096 16384 16777216"    # <<< FIXED
         "net.ipv4.tcp_mtu_probing=1"
         "net.core.netdev_max_backlog=32768"
         "net.core.somaxconn=16384"
@@ -86,8 +86,8 @@ set_profile_datacenter_10g() {
     export SYSCTL_SETTINGS=(
         "net.core.rmem_max=33554432"
         "net.core.wmem_max=33554432"
-        "net.ipv4.tcp_rmem='4096 262144 33554432'"
-        "net.ipv4.tcp_wmem='4096 32768 33554432'"
+        "net.ipv4.tcp_rmem=4096 262144 33554432"   # <<< FIXED
+        "net.ipv4.tcp_wmem=4096 32768 33554432"    # <<< FIXED
         "net.core.netdev_max_backlog=65536"
         "net.core.somaxconn=65536"
         "net.ipv4.tcp_timestamps=1"
@@ -117,6 +117,7 @@ EOF
         echo "$setting" >> "$CONF_FILE"
     done
 
+    # This should now succeed
     sysctl --system >/dev/null
 }
 
@@ -188,7 +189,7 @@ apply_ssh_hardening() {
     echo "Applying SSH hardening..."
     local conf_file="/etc/ssh/sshd_config.d/99-hardening.conf"
     mkdir -p "$(dirname "$conf_file")"
-    if [ -n "$SSH_USER" ] && [ -n "$SSH_PUBKEY" ]; then
+    if [ -n "${SSH_USER:-}" ] && [ -n "${SSH_PUBKEY:-}" ]; then
         local home_dir
         home_dir=$(getent passwd "$SSH_USER" | cut -d: -f6)
         local auth_keys_file="$home_dir/.ssh/authorized_keys"
@@ -228,25 +229,21 @@ ask_questions() {
     select choice in "auto (Balanced BBR)" "lan_low_latency (Low Delay)" "wan_throughput (Bulk Transfer)" "datacenter_10g (10G+ Networks)"; do
         case $choice in
             "auto (Balanced BBR)")
-                PROFILE="auto" # <<< FIXED
+                PROFILE="auto"
                 set_profile_auto
-                break
-                ;;
+                break ;;
             "lan_low_latency (Low Delay)")
-                PROFILE="lan_low_latency" # <<< FIXED
+                PROFILE="lan_low_latency"
                 set_profile_lan_low_latency
-                break
-                ;;
+                break ;;
             "wan_throughput (Bulk Transfer)")
-                PROFILE="wan_throughput" # <<< FIXED
+                PROFILE="wan_throughput"
                 set_profile_wan_throughput
-                break
-                ;;
+                break ;;
             "datacenter_10g (10G+ Networks)")
-                PROFILE="datacenter_10g" # <<< FIXED
+                PROFILE="datacenter_10g"
                 set_profile_datacenter_10g
-                break
-                ;;
+                break ;;
             *) echo "Invalid option. Please try again." ;;
         esac
     done
@@ -300,8 +297,6 @@ uninstall() {
 
 main() {
     check_root
-    # The check_dependencies and ask_questions functions no longer need < /dev/tty
-    # because the recommended execution method avoids the pipe issue.
     check_dependencies
     ask_questions
     echo ""
@@ -309,7 +304,7 @@ main() {
     apply_sysctl
     apply_nic_tuning
     apply_limits
-    if [ "$DO_SSH_HARDEN" = "true" ]; then
+    if [ "${DO_SSH_HARDEN:-false}" = "true" ]; then
         apply_ssh_hardening
     else
         echo "Skipping SSH hardening as requested."
@@ -327,7 +322,6 @@ main() {
 # Check for --uninstall flag
 if [ "${1:-}" = "--uninstall" ]; then
     check_root
-    # The uninstall function needs to be able to prompt the user as well
     read -rp "Are you sure you want to remove all tuning configurations? [y/N]: " confirm
     if [[ "$confirm" =~ ^[Yy]$ ]]; then
         uninstall
