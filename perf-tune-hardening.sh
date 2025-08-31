@@ -4,6 +4,7 @@
 #
 # This self-contained script applies system-wide performance tuning and optional
 # SSH hardening. It is designed to be fully interactive and idempotent.
+# It includes fixes to allow interactive use when piped from curl.
 #
 # Usage:
 #   - Interactive Install: curl -sSL <URL_TO_SCRIPT> | sudo bash
@@ -24,7 +25,8 @@ check_root() {
 check_dependencies() {
     if ! command -v ethtool >/dev/null 2>&1 || ! command -v ip >/dev/null 2>&1; then
         echo "Notice: Required tools (ethtool, iproute2) not found."
-        read -rp "Attempt to install them via apt? [Y/n]: " choice
+        # Read directly from the terminal, not the stdin pipe
+        read -rp "Attempt to install them via apt? [Y/n]: " choice < /dev/tty # <<< MODIFIED
         if [[ ! "$choice" =~ ^[Nn]$ ]]; then
             echo "Installing dependencies..."
             apt-get update
@@ -150,39 +152,28 @@ apply_nic_tuning() {
     echo "PROFILE=${PROFILE}" > /etc/default/perf-tuning
 
     # Create the script that will run on boot
-    # It sources the profile from the defaults file
     cat > /usr/local/sbin/tune-nic.sh <<'EOF'
 #!/bin/bash
 set -eu
 
-# Source the saved profile
-if [ -f /etc/default/perf-tuning ]; then
-    source /etc/default/perf-tuning
-fi
+if [ -f /etc/default/perf-tuning ]; then source /etc/default/perf-tuning; fi
 PROFILE=${PROFILE:-auto}
-
 log() { echo "[tune-nic] $*"; }
 
-# Re-define settings within the script for independence
 declare -A PROFILES
 PROFILES["lan_low_latency"]="adaptive-rx off;adaptive-tx off;rx-usecs 50;tx-usecs 50"
 PROFILES["datacenter_10g"]="adaptive-rx on;adaptive-tx on"
-# Default is adaptive on for auto and wan_throughput
 PROFILES["auto"]="adaptive-rx on;adaptive-tx on"
 PROFILES["wan_throughput"]="adaptive-rx on;adaptive-tx on"
 
 tune_one() {
     local ifc="$1"
     log "Tuning interface: $ifc with profile: $PROFILE"
-
-    # Apply ethtool settings from the profile
     local settings=${PROFILES[$PROFILE]}
     IFS=';' read -ra setting_pairs <<< "$settings"
     for pair in "${setting_pairs[@]}"; do
         ethtool -C "$ifc" $pair >/dev/null 2>&1 || log "WARN: Could not set '$pair' on $ifc"
     done
-
-    # For 10G profile, maximize ring buffers
     if [ "$PROFILE" = "datacenter_10g" ]; then
         read -r max_rx max_tx < <(ethtool -g "$ifc" | awk '/^RX:/{rx=$2} /^TX:/{tx=$2} END{print rx, tx}')
         if [[ -n "$max_rx" && -n "$max_tx" ]]; then
@@ -191,8 +182,6 @@ tune_one() {
         fi
     fi
 }
-
-# Find and tune active physical interfaces
 for ifc in $(ls -1 /sys/class/net | grep -E '^(en|eth)'); do
     [ "$(cat /sys/class/net/${ifc}/operstate)" == "up" ] && tune_one "$ifc"
 done
@@ -220,7 +209,6 @@ apply_limits() {
     echo "Applying security limits (ulimit)..."
     mkdir -p /etc/security/limits.d
     cat > /etc/security/limits.d/99-perf.conf <<'EOF'
-# Increase file descriptor limits for all users
 * soft nofile 1048576
 * hard nofile 1048576
 root soft nofile 1048576
@@ -234,35 +222,22 @@ apply_ssh_hardening() {
     local conf_file="/etc/ssh/sshd_config.d/99-hardening.conf"
     mkdir -p "$(dirname "$conf_file")"
 
-    # Add public key to the specified user
     if [ -n "$SSH_USER" ] && [ -n "$SSH_PUBKEY" ]; then
         local home_dir
         home_dir=$(getent passwd "$SSH_USER" | cut -d: -f6)
-        if [ -z "$home_dir" ]; then
-            echo "Error: User '$SSH_USER' not found. Cannot add public key." >&2
-            # Continue to harden SSH, but warn the user.
-        else
-            local auth_keys_file="$home_dir/.ssh/authorized_keys"
-            echo "Adding public key to $auth_keys_file"
-            mkdir -p "$home_dir/.ssh"
-            chmod 700 "$home_dir/.ssh"
-            
-            # Avoid adding duplicate keys
-            if ! grep -qF "$SSH_PUBKEY" "$auth_keys_file" 2>/dev/null; then
-                echo "$SSH_PUBKEY" >> "$auth_keys_file"
-            fi
-            
-            chown -R "$SSH_USER:$SSH_USER" "$home_dir/.ssh"
-            chmod 600 "$auth_keys_file"
-        fi
+        local auth_keys_file="$home_dir/.ssh/authorized_keys"
+        echo "Adding public key to $auth_keys_file"
+        mkdir -p "$home_dir/.ssh"
+        chmod 700 "$home_dir/.ssh"
+        if ! grep -qF "$SSH_PUBKEY" "$auth_keys_file" 2>/dev/null; then echo "$SSH_PUBKEY" >> "$auth_keys_file"; fi
+        chown -R "$SSH_USER:$SSH_USER" "$home_dir/.ssh"
+        chmod 600 "$auth_keys_file"
     else
         echo "Warning: No user or public key provided. Skipping key installation."
     fi
 
-    # Create the sshd hardening config
     cat > "$conf_file" <<'EOF'
 # Managed by performance tuning script
-# Enforce modern, secure settings.
 Protocol 2
 PasswordAuthentication no
 ChallengeResponseAuthentication no
@@ -272,7 +247,6 @@ Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.
 MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com
 EOF
 
-    # Reload SSH service
     echo "Reloading SSH service..."
     systemctl reload-or-restart ssh
 }
@@ -285,6 +259,7 @@ ask_questions() {
     echo "Step 1: Select a Performance Profile"
     echo "----------------------------------------"
     PS3="Enter the number for your desired profile: "
+    # The entire select loop must be redirected
     select choice in "auto (Balanced BBR)" "lan_low_latency (Low Delay)" "wan_throughput (Bulk Transfer)" "datacenter_10g (10G+ Networks)"; do
         case $choice in
             "auto (Balanced BBR)") set_profile_auto; break ;;
@@ -293,19 +268,20 @@ ask_questions() {
             "datacenter_10g (10G+ Networks)") set_profile_datacenter_10g; break ;;
             *) echo "Invalid option. Please try again." ;;
         esac
-    done
-    export PROFILE # Make it available to sub-processes
+    done < /dev/tty # <<< MODIFIED
+
+    export PROFILE
 
     echo ""
     echo "Step 2: SSH Hardening (Optional)"
     echo "----------------------------------------"
-    read -rp "Apply SSH hardening? (Disables passwords, enforces key auth) [y/N]: " choice
+    read -rp "Apply SSH hardening? (Disables passwords, enforces key auth) [y/N]: " choice < /dev/tty # <<< MODIFIED
     if [[ "$choice" =~ ^[Yy]$ ]]; then
         export DO_SSH_HARDEN="true"
         echo ""
         echo "You've chosen to harden SSH. A public key is required to ensure access."
         while true; do
-            read -rp "Enter the username to add the public key to: " SSH_USER
+            read -rp "Enter the username to add the public key to: " SSH_USER < /dev/tty # <<< MODIFIED
             if id "$SSH_USER" &>/dev/null; then
                 break
             else
@@ -313,7 +289,7 @@ ask_questions() {
             fi
         done
         echo "Paste the full SSH public key (e.g., ssh-ed25519 AAAA...):"
-        read -rp "Public Key: " SSH_PUBKEY
+        read -rp "Public Key: " SSH_PUBKEY < /dev/tty # <<< MODIFIED
         if [[ ! "$SSH_PUBKEY" =~ ^ssh- ]]; then
             echo "Warning: The provided text does not look like a public key."
         fi
@@ -326,25 +302,18 @@ ask_questions() {
 
 uninstall() {
     echo "Uninstalling all performance tuning and hardening configurations..."
-    
-    # Disable and remove services
     systemctl disable --now tune-nic.service 2>/dev/null || true
     rm -f /etc/systemd/system/tune-nic.service
-    
-    # Remove files
     rm -f /usr/local/sbin/tune-nic.sh
     rm -f /etc/default/perf-tuning
     rm -f /etc/sysctl.d/98-perf-profile.conf
     rm -f /etc/sysctl.d/99-perf-base.conf
     rm -f /etc/security/limits.d/99-perf.conf
     rm -f /etc/ssh/sshd_config.d/99-hardening.conf
-    
-    # Reload system services
     echo "Reloading systemd, sysctl, and ssh..."
     systemctl daemon-reload
     sysctl --system >/dev/null
     systemctl reload-or-restart ssh 2>/dev/null || true
-    
     echo "Uninstallation complete. A reboot is recommended to restore all defaults."
 }
 
@@ -352,30 +321,24 @@ main() {
     check_root
     check_dependencies
     ask_questions
-    
     echo ""
     echo "--- Applying Configurations ---"
-    
     apply_sysctl
     apply_nic_tuning
     apply_limits
-    
     if [ "$DO_SSH_HARDEN" = "true" ]; then
         apply_ssh_hardening
     else
         echo "Skipping SSH hardening as requested."
     fi
-    
     echo "Reloading systemd daemon and enabling services..."
     systemctl daemon-reload
     systemctl enable --now tune-nic.service 2>/dev/null || true
-    
     echo ""
     echo "-------------------------------------"
     echo " Installation Complete"
     echo "-------------------------------------"
     echo "Tuning has been applied and will persist across reboots."
-    echo "A system reboot is recommended to ensure all settings take full effect."
 }
 
 # Check for --uninstall flag
