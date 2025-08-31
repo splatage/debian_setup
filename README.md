@@ -1,22 +1,28 @@
-# Debian ZFS Root Bootstrap
+## Initial Bootstrap (Debian + ZFS on Root)
 
-This script automates the installation of **Debian 12 (Bookworm)** with **ZFS on root**, supporting:
+This script installs Debian 12 (Bookworm) directly onto ZFS with support for BIOS or UEFI boot, optional native encryption, and multiple RAID layouts.
 
-- UEFI and BIOS boot
-- Encrypted or unencrypted `rpool`
-- Mirror, RAIDZ1/2/3, and RAID10 layouts
-- Hardened root SSH login (key-only)
-- Preinstalled benchmarking and server tools
+Run it from a live Debian environment:
 
-> **Warning**: This script is **destructive**. It will wipe all selected disks. Use with extreme caution.
+    curl https://raw.githubusercontent.com/splatage/debian_setup/refs/heads/main/debian_zfs_install.sh | bash
 
----
+### Features
 
-## 🌀 Quick Start (Live Debian Shell)
+- Full disk wipe and GPT partitioning
+- Supports BIOS or UEFI boot
+- Creates ZFS pools:
+  - bpool (boot pool)
+  - rpool (root pool)
+- Optional ZFS native encryption for rpool
+- Installs Debian 12 using debootstrap
+- Configures systemd units for ZFS import
+- Hardened SSH key-only root login
+- Preinstalls useful tools (fio, wrk, iperf3, tmux, redis, etc.)
 
-```bash
-curl https://raw.githubusercontent.com/splatage/debian_setup/refs/heads/main/debian_zfs_install.sh | bash
-```
+### When to run it
+
+Run this script from a Debian live ISO or recovery environment.  
+At the end, the system will be fully installed and ready to reboot into your new Debian + ZFS root environment.
 
 ---
 
@@ -49,6 +55,39 @@ curl https://raw.githubusercontent.com/splatage/debian_setup/refs/heads/main/deb
 Use at your own risk. This script **destroys data** on selected drives and performs low-level configuration. Validate disk selection and backups before proceeding.
 
 ---
+## Post-Boot Performance Hardening
+
+After the base system has been installed with `debian_zfs_install.sh` and the machine reboots for the first time, you can apply system-wide performance and hardening settings.
+
+Run:
+
+    curl https://raw.githubusercontent.com/splatage/debian_setup/refs/heads/main/perf-tune-hardening.sh | bash
+
+### What this does
+
+- Prompts for a network performance profile:
+  - balanced – safe defaults
+  - high-throughput – maximum RPS/XPS, larger queues
+  - low-latency – reduced buffering, minimal queuing
+  - custom – uses your existing /etc/default/tune-bond
+- Configures sysctl tunables for networking, memory, and kernel limits
+- Installs /usr/sbin/tune-bond and /usr/sbin/tune-sysctl
+- Sets process limits in /etc/security/limits.d/99-perf.conf
+- Deploys systemd services:
+  - disable-thp.service – disables Transparent Huge Pages
+  - tune-sysctl.service – ensures sysctl settings are applied
+  - tune-bond.service – applies NIC bonding, RPS, and IRQ tuning
+- Adds systemd overrides for:
+  - redis-server.service
+  - mariadb.service
+
+### When to run it
+
+Run this script once after the first boot on a freshly provisioned Debian system.  
+It will configure and enable services to apply these settings automatically at every boot.
+
+---
+
 
 ## 🧪 Development Notes
 
