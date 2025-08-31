@@ -61,7 +61,7 @@ After the base system has been installed with `debian_zfs_install.sh` and the ma
 
 Run:
 
-    curl https://raw.githubusercontent.com/splatage/debian_setup/refs/heads/main/perf-tune-hardening.sh | bash
+    bash -c "$(curl https://raw.githubusercontent.com/splatage/debian_setup/refs/heads/main/perf-tune-hardening.sh)"
 
 ### What this does
 
