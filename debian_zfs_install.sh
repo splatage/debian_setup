@@ -1,7 +1,14 @@
 #!/bin/bash
 
 echo "Enter hostname"
-read HOST_NAME 
+read HOST_NAME
+
+echo "Updating aptcache"
+sed -i  "/deb/s/main non-free-firmware/main contrib non-free-firmware" /etc/apt/sources.list
+apt-get update
+
+echo "Installing core ZFS utils and debootstrap"
+apt install --yes debootstrap gdisk zfsutils-linux grub2
 
 DISKS=$(lsblk -ndo NAME,SIZE,TYPE,MODEL | grep -v "loop" | grep -v "sr" | awk '{if ($3 == "disk") print $1}')
 
