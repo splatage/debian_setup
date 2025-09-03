@@ -1,5 +1,8 @@
 #!/bin/bash
 
+echo "Enter hostname"
+read HOST_NAME 
+
 DISKS=$(lsblk -ndo NAME,SIZE,TYPE,MODEL | grep -v "loop" | grep -v "sr" | awk '{if ($3 == "disk") print $1}')
 
 if [ -z "$DISKS" ]; then
