@@ -4,7 +4,7 @@ echo "Enter hostname"
 read HOST_NAME
 
 echo "Updating aptcache"
-sed -i  "/deb/s/main non-free-firmware/main contrib non-free-firmware" /etc/apt/sources.list
+sed -i  "/deb/s/main non-free-firmware/main contrib non-free-firmware/" /etc/apt/sources.list
 apt-get update
 
 echo "Installing core ZFS utils and debootstrap"
