@@ -107,6 +107,8 @@ vm.swappiness=10
 kernel.kptr_restrict=2
 net.ipv4.conf.all.accept_redirects=0
 net.ipv4.conf.default.accept_redirects=0
+net.ipv6.conf.all.disable_ipv6=1 
+net.ipv6.conf.default.disable_ipv6=1
 EOF
 
     CONF_FILE="/etc/sysctl.d/98-perf-profile.conf"
