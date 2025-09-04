@@ -258,6 +258,7 @@ CONFIG_EOF
 
 if [ ! -d "${MARIADB_BASE_DIR}/data/mysql" ]; then
   info "Initializing new MariaDB data directory..."
+  chown -R mysql:mysql "${MARIADB_BASE_DIR}"
   mariadb-install-db --user=mysql --datadir="${MARIADB_BASE_DIR}/data"
 fi
 chown -R mysql:mysql "${MARIADB_BASE_DIR}"
