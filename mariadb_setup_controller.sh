@@ -242,7 +242,7 @@ success "ZFS setup complete."
 info "Installing MariaDB..."
 apt-get update >/dev/null
 apt-get install -y curl >/dev/null
-curl -sO https://downloads.mariadb.com/MariaDB/mariadb_repo_setup
+curl -LsSO https://r.mariadb.com/downloads/mariadb_repo_setup
 chmod +x mariadb_repo_setup
 ./mariadb_repo_setup --mariadb-server-version="mariadb-11.4"
 apt-get install -y mariadb-server mariadb-backup
