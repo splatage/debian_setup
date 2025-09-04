@@ -4,7 +4,7 @@ This script installs Debian 12 (Bookworm) directly onto ZFS with support for BIO
 
 Run it from a live Debian environment:
 
-    curl https://raw.githubusercontent.com/splatage/debian_setup/refs/heads/main/debian_zfs_install.sh > debian_zfs_install.sh
+    curl -O https://raw.githubusercontent.com/splatage/debian_setup/refs/heads/main/debian_zfs_install.sh
     bash debian_zfs_install.sh
 
 ### Features
@@ -62,7 +62,7 @@ After the base system has been installed with `debian_zfs_install.sh` and the ma
 
 Run:
 
-    curl https://raw.githubusercontent.com/splatage/debian_setup/refs/heads/main/perf-tune-hardening.sh > perf-tune-hardening.sh
+    curl -O https://raw.githubusercontent.com/splatage/debian_setup/refs/heads/main/perf-tune-hardening.sh
     bash perf-tune-hardening.sh
 
 ### What this does
@@ -90,6 +90,14 @@ It will configure and enable services to apply these settings automatically at e
 
 ---
 
+## Temp Fan Control
+
+Server fan often react badly to non OEM hardware. This installs a service to put monitor temps and adjust fan speeds
+
+    curl -O https://github.com/splatage/debian_setup/raw/refs/heads/main/fan_temp_service.sh
+    bash fan_temp_service.sh
+
+---
 
 ## 🧪 Development Notes
 
