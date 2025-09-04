@@ -225,7 +225,7 @@ success() { echo "[REMOTE] SUCCESS: \$1"; }
 info "Running initial setup on ${node_ip}"
 if zpool list "${ZFS_POOL_NAME}" &>/dev/null; then
   warn "ZFS pool '${ZFS_POOL_NAME}' already exists. Skipping creation."
-  warn "Do $zpool destroy '${ZFS_POOL_NAME}' to clearout stale datasets."
+  warn "Do zpool destroy '${ZFS_POOL_NAME}' to clearout stale datasets."
 else
   info "Creating ZFS pool ${ZFS_POOL_NAME} on ${ZFS_DEVICE}"
   zpool create "${ZFS_POOL_NAME}" "${ZFS_DEVICE}" -f
