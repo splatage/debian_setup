@@ -18,7 +18,7 @@
 set -euo pipefail
 
 # --- !! CONFIGURE THESE VARIABLES !! ---
-readonly PRIMARY_IP="192.168.1.221"
+readonly PRIMARY_IP="192.168.1.221"z
 # Add all replica IPs to this array.
 readonly REPLICA_IP_LIST=(
   "192.168.1.222"
@@ -225,19 +225,19 @@ success() { echo "[REMOTE] SUCCESS: \$1"; }
 info "Running initial setup on ${node_ip}"
 if zpool list "${ZFS_POOL_NAME}" &>/dev/null; then
   warn "ZFS pool '${ZFS_POOL_NAME}' already exists. Skipping creation."
+  warn "Do $zpool destroy '${ZFS_POOL_NAME}' to clearout stale datasets."
 else
   info "Creating ZFS pool ${ZFS_POOL_NAME} on ${ZFS_DEVICE}"
   zpool create "${ZFS_POOL_NAME}" "${ZFS_DEVICE}" -f
+  zfs set mountpoint="${MARIADB_BASE_DIR}" "${ZFS_POOL_NAME}"
+  zfs set compression=lz4 atime=off logbias=throughput "${ZFS_POOL_NAME}"
+  zfs create -o mountpoint="${MARIADB_BASE_DIR}/data" \
+    -o recordsize=16k -o primarycache=metadata \
+    "${ZFS_POOL_NAME}/data" 2>/dev/null || warn "Data dataset exists."
+  zfs create -o mountpoint="${MARIADB_BASE_DIR}/log" \
+    "${ZFS_POOL_NAME}/log" 2>/dev/null || warn "Log dataset exists."
+  success "ZFS setup complete."
 fi
-
-zfs set mountpoint="${MARIADB_BASE_DIR}" "${ZFS_POOL_NAME}"
-zfs set compression=lz4 atime=off logbias=throughput "${ZFS_POOL_NAME}"
-zfs create -o mountpoint="${MARIADB_BASE_DIR}/data" \
-  -o recordsize=16k -o primarycache=metadata \
-  "${ZFS_POOL_NAME}/data" 2>/dev/null || warn "Data dataset exists."
-zfs create -o mountpoint="${MARIADB_BASE_DIR}/log" \
-  "${ZFS_POOL_NAME}/log" 2>/dev/null || warn "Log dataset exists."
-success "ZFS setup complete."
 
 info "Installing MariaDB..."
 apt-get update >/dev/null
