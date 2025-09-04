@@ -78,7 +78,6 @@ get_config_template() {
 # server-id                     = {{SERVER_ID}}
 # binlog_format                 = ROW
 # binlog_row_image              = FULL
-# expire_logs_days              = 10
 # sync_binlog                   = 0                   # perf; raise to 1 if you need crash-safe binlog
 # gtid_strict_mode              = ON
 # innodb_flush_log_at_trx_commit= 2                   # 1 = safest; 2 = faster
@@ -122,7 +121,7 @@ general_log_file              = /var/lib/mysql/log/mariadb.log
 relay_log                     = /var/lib/mysql/log/relay-bin
 log_bin                       = /var/lib/mysql/log/binlog
 innodb_log_group_home_dir     = /var/lib/mysql/log
-expire_logs_days              = 7
+expire_logs_days              = 10
 
 # SLOW LOGGING  (reduce overhead vs your current settings)
 slow_query_log                = ON
@@ -155,7 +154,7 @@ innodb_io_capacity_max        = 30000
 innodb_flush_neighbors        = 0
 innodb_checksum_algorithm     = crc32
 innodb_compression_algorithm  = none
-innodb_compression_level      =
+innodb_compression_level      = 0
 innodb_autoinc_lock_mode      = 2
 innodb_stats_on_metadata      = OFF
 innodb_purge_threads          = 4
