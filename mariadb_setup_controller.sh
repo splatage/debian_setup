@@ -336,7 +336,7 @@ EOF
   success "Backup created and prepared on Primary in ${backdir}."
 
   local gtid
-  gtid=$(ssh "${SSH_USER}@${PRIMARY_IP}" "awk '{print \\\$3}' '${backdir}/mariadb_backup_binlog_info'")
+  gtid=$(ssh "${SSH_USER}@${PRIMARY_IP}" "awk '{print \$3}' '${backdir}/mariadb_backup_binlog_info'")
   info "Captured GTID position for seeding: ${C_GREEN}${C_BOLD}${gtid}${C_RESET}"
 
   info "Step 3: Copying backup from Primary to Replica via rsync..."
