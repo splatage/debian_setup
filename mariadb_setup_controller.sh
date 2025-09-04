@@ -220,6 +220,9 @@ info() { echo "[REMOTE] INFO: \$1"; }
 warn() { echo "[REMOTE] WARN: \$1"; }
 success() { echo "[REMOTE] SUCCESS: \$1"; }
 
+info "Stopping any existing mariadb instances"
+systemctl stop mariadb
+
 info "Running initial setup on ${node_ip}"
 if zpool list "${ZFS_POOL_NAME}" &>/dev/null; then
   warn "ZFS pool '${ZFS_POOL_NAME}' already exists. Destroying and recreating to ensure a clean state."
