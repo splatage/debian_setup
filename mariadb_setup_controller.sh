@@ -21,8 +21,8 @@ set -euo pipefail
 readonly PRIMARY_IP="192.168.1.221"
 # Add all replica IPs to this array.
 readonly REPLICA_IP_LIST=(
+  "192.168.1.222"
   "192.168.1.223"
-  "192.168.1.224"
 )
 # All remote operations will be performed as this user.
 readonly SSH_USER="root"
@@ -68,7 +68,7 @@ success() {
 # Retrieves the full MariaDB configuration template.
 #######################################
 get_config_template() {
-  cat << 'EOF'
+  cat << EOF
 [mariadbd]
 
 #################################################################
@@ -253,7 +253,7 @@ info "Stopping MariaDB to apply configuration..."
 systemctl stop mariadb
 
 info "Writing new configuration file..."
-cat > /etc/mysql/mariadb.conf.d/50-server.cnf << 'CONFIG_EOF'
+cat > /etc/mysql/mariadb.conf.d/50-server.cnf << CONFIG_EOF
 ${config_content}
 CONFIG_EOF
 
