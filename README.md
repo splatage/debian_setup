@@ -4,7 +4,8 @@ This script installs Debian 12 (Bookworm) directly onto ZFS with support for BIO
 
 Run it from a live Debian environment:
 
-    curl https://raw.githubusercontent.com/splatage/debian_setup/refs/heads/main/debian_zfs_install.sh | bash
+    curl https://raw.githubusercontent.com/splatage/debian_setup/refs/heads/main/debian_zfs_install.sh > debian_zfs_install.sh
+    bash debian_zfs_install.sh
 
 ### Features
 
@@ -60,7 +61,9 @@ Use at your own risk. This script **destroys data** on selected drives and perfo
 After the base system has been installed with `debian_zfs_install.sh` and the machine reboots for the first time, you can apply system-wide performance and hardening settings.
 
 Run:
+
     curl https://raw.githubusercontent.com/splatage/debian_setup/refs/heads/main/perf-tune-hardening.sh > perf-tune-hardening.sh
+
     bash perf-tune-hardening.sh
 
 ### What this does
