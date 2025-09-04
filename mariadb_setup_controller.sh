@@ -224,8 +224,18 @@ success() { echo "[REMOTE] SUCCESS: \$1"; }
 
 info "Running initial setup on ${node_ip}"
 if zpool list "${ZFS_POOL_NAME}" &>/dev/null; then
-  warn "ZFS pool '${ZFS_POOL_NAME}' already exists. Skipping creation."
-  warn "Do zpool destroy '${ZFS_POOL_NAME}' to clearout stale datasets."
+  warn "ZFS pool '${ZFS_POOL_NAME}' already exists. Destroying and recreating to ensure a clean state."
+  zpool destroy -f "${ZFS_POOL_NAME}"
+  info "Recreating ZFS pool ${ZFS_POOL_NAME} on ${ZFS_DEVICE}"
+  zpool create "${ZFS_POOL_NAME}" "${ZFS_DEVICE}" -f
+  zfs set mountpoint="${MARIADB_BASE_DIR}" "${ZFS_POOL_NAME}"
+  zfs set compression=lz4 atime=off logbias=throughput "${ZFS_POOL_NAME}"
+  zfs create -o mountpoint="${MARIADB_BASE_DIR}/data" \
+    -o recordsize=16k -o primarycache=metadata \
+    "${ZFS_POOL_NAME}/data" 2>/dev/null || warn "Data dataset exists."
+  zfs create -o mountpoint="${MARIADB_BASE_DIR}/log" \
+    "${ZFS_POOL_NAME}/log" 2>/dev/null || warn "Log dataset exists."
+  success "ZFS setup complete."
 else
   info "Creating ZFS pool ${ZFS_POOL_NAME} on ${ZFS_DEVICE}"
   zpool create "${ZFS_POOL_NAME}" "${ZFS_DEVICE}" -f
@@ -248,24 +258,20 @@ chmod +x mariadb_repo_setup
 apt-get install -y mariadb-server mariadb-backup
 success "MariaDB installed."
 
-info "Stopping MariaDB to apply configuration..."
+info "Disabling MariaDB to apply configuration and prepare for seeding..."
 systemctl stop mariadb
+systemctl disable mariadb
 
 info "Writing new configuration file..."
 cat > /etc/mysql/mariadb.conf.d/50-server.cnf << CONFIG_EOF
 ${config_content}
 CONFIG_EOF
 
-if [ ! -d "${MARIADB_BASE_DIR}/data/mysql" ]; then
-  info "Initializing new MariaDB data directory..."
-  chown -R mysql:mysql "${MARIADB_BASE_DIR}"
-  mariadb-install-db --user=mysql --datadir="${MARIADB_BASE_DIR}/data"
-fi
 chown -R mysql:mysql "${MARIADB_BASE_DIR}"
-systemctl start mariadb
-success "Node ${node_ip} successfully configured as a ${role}."
+success "Node ${node_ip} successfully configured as a ${role}. Ready for seeding from the Primary"
 EOF
 }
+
 
 #######################################
 # Seeds a chosen replica with a fresh backup from the primary.
@@ -320,6 +326,10 @@ EOF
   local gtid
   gtid=$(ssh "${SSH_USER}@${PRIMARY_IP}" \
     "awk '{print \$3}' '${backdir_path}/mariadb_backup_binlog_info'")
+  if [[ -z "${gtid}" ]]; then
+    echo "Error: Could not read GTID from '${backdir_path}/mariadb_backup_binlog_info' on primary." >&2
+    exit 1
+  fi
   info "Captured GTID position for seeding: ${C_GREEN}${C_BOLD}${gtid}${C_RESET}"
 
   info "Step 3: Streaming backup from Primary to Replica via tar pipe..."
@@ -327,7 +337,7 @@ EOF
     "tar -c -C '${BACKUP_BASE_DIR}' '${backdir_name}'" \
     | \
   ssh "${SSH_USER}@${target_replica_ip}" \
-    "mkdir -p '${BACKUP_BASE_DIR}' && tar -x -C '${BACKUP_BASE_DIR}'"
+    "mkdir -p '${BACKUP_BASE_DIR}' && tar -x -C '${BACKUP_BASE_DIR}' && test -d '${BACKUP_BASE_DIR}/${backdir_name}'"
   success "Backup streamed and extracted on replica."
   
   info "Step 4: Applying backup and configuring replication on Replica..."
@@ -340,9 +350,15 @@ readonly DECODED_PASSWORD="\$(echo '${repl_password_b64}' | base64 -d)"
 info "Stopping MariaDB service on replica..."
 systemctl stop mariadb
 
-info "Clearing existing data and log directories..."
-rm -rf "${MARIADB_BASE_DIR:?}/data/"*
-rm -rf "${MARIADB_BASE_DIR:?}/log/"*
+info "Validating pristine datasets (no existing data)..."
+if [ ! -d "${MARIADB_BASE_DIR}/data" ] || [ ! -d "${MARIADB_BASE_DIR}/log" ]; then
+  echo "[REMOTE] ERROR: Expected datasets '${MARIADB_BASE_DIR}/data' and '${MARIADB_BASE_DIR}/log' not found." >&2
+  exit 1
+fi
+if [ -n "\$(ls -A "${MARIADB_BASE_DIR}/data" 2>/dev/null)" ] || [ -n "\$(ls -A "${MARIADB_BASE_DIR}/log" 2>/dev/null)" ]; then
+  echo "[REMOTE] ERROR: Non-empty data/log directories detected; aborting to avoid clobbering an existing database." >&2
+  exit 1
+fi
 
 info "Restoring from backup..."
 mariabackup --copy-back --target-dir="${BACKUP_BASE_DIR}/${backdir_name}"
@@ -350,6 +366,7 @@ chown -R mysql:mysql "${MARIADB_BASE_DIR}"
 
 info "Starting MariaDB service..."
 systemctl start mariadb
+systemctl enable mariadb
 success "Restore complete. MariaDB started."
 
 info "Configuring replication..."
