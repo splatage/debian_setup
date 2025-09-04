@@ -7,7 +7,8 @@
 # workstation/bastion) and configures the PRIMARY and REPLICA servers remotely
 # via SSH.
 #
-# This script strictly adheres to the Google Shell Style Guide.
+# v1.3: Implements a direct ssh-to-ssh pipe for efficient backup streaming,
+#       avoiding intermediate storage on the controller.
 #
 # PREREQUISITES:
 #   - The controller machine must have passwordless SSH (key-based) access as
@@ -65,11 +66,6 @@ success() {
 
 #######################################
 # Retrieves the full MariaDB configuration template.
-# This function uses a heredoc to store the complete, unmodified config.
-# Globals:
-#   None
-# Outputs:
-#   Writes the configuration template string to stdout.
 #######################################
 get_config_template() {
   cat << 'EOF'
@@ -190,13 +186,6 @@ EOF
 
 #######################################
 # Remotely configures a single node with ZFS and MariaDB.
-# Uses SSH heredocs to perform setup, installation, and configuration.
-# Globals:
-#   SSH_USER
-#   ZFS_POOL_NAME, ZFS_DEVICE, MARIADB_BASE_DIR
-# Args:
-#   $1: The IP address of the node to configure.
-#   $2: The role of the node ('Primary' or 'Replica').
 #######################################
 configure_node() {
   local node_ip="${1}"
@@ -230,7 +219,6 @@ configure_node() {
 
   ssh "${SSH_USER}@${node_ip}" "bash -s" -- << EOF
 set -e
-# Define local helper functions for the remote script
 info() { echo "[REMOTE] INFO: \$1"; }
 warn() { echo "[REMOTE] WARN: \$1"; }
 success() { echo "[REMOTE] SUCCESS: \$1"; }
@@ -281,13 +269,6 @@ EOF
 
 #######################################
 # Seeds a chosen replica with a fresh backup from the primary.
-# Wipes the target replica's data and replaces it with a new snapshot.
-# Handles password transport securely using Base64.
-# Globals:
-#   REPLICA_IP_LIST, PRIMARY_IP, SSH_USER, REPL_USER, BACKUP_BASE_DIR
-#   MARIADB_BASE_DIR
-# Args:
-#   None
 #######################################
 seed_replica() {
   info "Which replica do you want to seed?"
@@ -325,25 +306,29 @@ EOF
   success "Replication user configured on Primary."
 
   local now; now=$(date +%F_%H-%M)
-  local backdir="${BACKUP_BASE_DIR}/backup-${now}"
+  local backdir_name="backup-${now}"
+  local backdir_path="${BACKUP_BASE_DIR}/${backdir_name}"
   info "Step 2: Taking backup on Primary using mariabackup..."
   ssh "${SSH_USER}@${PRIMARY_IP}" "bash -s" -- << EOF
 set -e
-mkdir -p '${backdir}'
-mariabackup --backup --target-dir='${backdir}' --parallel=4
-mariabackup --prepare --target-dir='${backdir}'
+mkdir -p '${backdir_path}'
+mariabackup --backup --target-dir='${backdir_path}' --parallel=4
+mariabackup --prepare --target-dir='${backdir_path}'
 EOF
-  success "Backup created and prepared on Primary in ${backdir}."
+  success "Backup created and prepared on Primary in ${backdir_path}."
 
   local gtid
-  gtid=$(ssh "${SSH_USER}@${PRIMARY_IP}" "awk '{print \$3}' '${backdir}/mariadb_backup_binlog_info'")
+  gtid=$(ssh "${SSH_USER}@${PRIMARY_IP}" \
+    "awk '{print \$3}' '${backdir_path}/mariadb_backup_binlog_info'")
   info "Captured GTID position for seeding: ${C_GREEN}${C_BOLD}${gtid}${C_RESET}"
 
-  info "Step 3: Copying backup from Primary to Replica via rsync..."
-  rsync -auv --info=progress2 -e ssh \
-    "${SSH_USER}@${PRIMARY_IP}:${backdir}" \
-    "${SSH_USER}@${target_replica_ip}:${BACKUP_BASE_DIR}/"
-  success "Backup copied to replica."
+  info "Step 3: Streaming backup from Primary to Replica via tar pipe..."
+  ssh "${SSH_USER}@${PRIMARY_IP}" \
+    "tar -c -C '${BACKUP_BASE_DIR}' '${backdir_name}'" \
+    | \
+  ssh "${SSH_USER}@${target_replica_ip}" \
+    "mkdir -p '${BACKUP_BASE_DIR}' && tar -x -C '${BACKUP_BASE_DIR}'"
+  success "Backup streamed and extracted on replica."
   
   info "Step 4: Applying backup and configuring replication on Replica..."
   ssh "${SSH_USER}@${target_replica_ip}" "bash -s" -- << EOF
@@ -360,7 +345,7 @@ rm -rf "${MARIADB_BASE_DIR:?}/data/"*
 rm -rf "${MARIADB_BASE_DIR:?}/log/"*
 
 info "Restoring from backup..."
-mariabackup --copy-back --target-dir="${BACKUP_BASE_DIR}/backup-${now}"
+mariabackup --copy-back --target-dir="${BACKUP_BASE_DIR}/${backdir_name}"
 chown -R mysql:mysql "${MARIADB_BASE_DIR}"
 
 info "Starting MariaDB service..."
@@ -388,10 +373,6 @@ EOF
 
 #######################################
 # Rotates the replication password on the primary and all configured replicas.
-# Globals:
-#   REPL_USER, PRIMARY_IP, SSH_USER, REPLICA_IP_LIST
-# Args:
-#   None
 #######################################
 re_auth_replicas() {
   info "Starting replication credential rotation."
@@ -436,11 +417,6 @@ EOF
 
 #######################################
 # Performs a live role switchover between the primary and a chosen replica.
-# Promotes the replica and demotes the primary, re-pointing other replicas.
-# Globals:
-#   REPLICA_IP_LIST, REPL_USER, PRIMARY_IP, SSH_USER
-# Args:
-#   None
 #######################################
 switchover_roles() {
   info "Which replica do you want to promote to be the new Primary?"
@@ -512,7 +488,7 @@ switchover_roles() {
     "mariadb -e 'SET GLOBAL read_only = ON; FLUSH TABLES WITH READ LOCK;'"
   success "Old Primary is now read-only."
 
-  info "Step 3: Promoting Replica (${promoted_replica_ip}) to be the new Primary..."
+  info "Step 3: Promoting Replica (${promoted_replica_ip}) to be new Primary..."
   ssh "${SSH_USER}@${promoted_replica_ip}" \
     "mariadb -e 'STOP SLAVE; RESET MASTER; SET GLOBAL read_only = OFF;'"
   success "New Primary is live. Point applications to ${promoted_replica_ip} NOW."
@@ -567,11 +543,6 @@ EOF
 
 #######################################
 # Main execution logic for the script.
-# Parses command-line arguments and calls the appropriate function.
-# Globals:
-#   None
-# Args:
-#   $@: The command-line arguments passed to the script.
 #######################################
 main() {
   if [[ -z "${1:-}" ]]; then
