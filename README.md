@@ -60,8 +60,8 @@ Use at your own risk. This script **destroys data** on selected drives and perfo
 After the base system has been installed with `debian_zfs_install.sh` and the machine reboots for the first time, you can apply system-wide performance and hardening settings.
 
 Run:
-
-    bash -c "$(curl https://raw.githubusercontent.com/splatage/debian_setup/refs/heads/main/perf-tune-hardening.sh)"
+    curl https://raw.githubusercontent.com/splatage/debian_setup/refs/heads/main/perf-tune-hardening.sh > perf-tune-hardening.sh
+    bash perf-tune-hardening.sh
 
 ### What this does
 
