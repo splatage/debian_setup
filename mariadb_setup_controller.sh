@@ -18,7 +18,7 @@
 set -euo pipefail
 
 # --- !! CONFIGURE THESE VARIABLES !! ---
-readonly PRIMARY_IP="192.168.1.221"z
+readonly PRIMARY_IP="192.168.1.221"
 # Add all replica IPs to this array.
 readonly REPLICA_IP_LIST=(
   "192.168.1.222"
