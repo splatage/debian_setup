@@ -88,9 +88,7 @@ get_config_template() {
 # skip_slave_start              = ON         # start manually first time
 # log_slave_updates             = ON         # good for promotion later (keeps binlog chain)
 # gtid_strict_mode              = ON
-# If you set a non-zero domain on primary, match it here:
 # gtid_domain_id                = 0
-# Crash-safe relay logs
 # relay_log_recovery            = ON
 ##################################################################
 
