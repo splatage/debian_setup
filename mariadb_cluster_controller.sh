@@ -566,9 +566,12 @@ EOF
   warn "     before running it again."
 }
 
-
 #######################################
 # Health check across PRIMARY + all REPLICAS (read-only, nounset-safe).
+# Env thresholds (optional):
+#   HEALTH_LAG_WARN=30           # seconds
+#   HEALTH_DISK_WARN=85          # percent
+#   HEALTH_LONG_TRX_WARN=600     # seconds
 #######################################
 health_check() {
   info "Running health check across MariaDB cluster..."
@@ -579,7 +582,7 @@ health_check() {
     info "Probing ${node_ip}..."
     local report
     report=$(ssh -o ConnectTimeout=5 "${SSH_USER}@${node_ip}" \
-      "env -i NODE_IP='${node_ip}' MARIADB_BASE_DIR='${MARIADB_BASE_DIR}' ZFS_POOL_NAME='${ZFS_POOL_NAME}' bash --noprofile --norc -s" -- <<'REMOTE'
+      "env -i NODE_IP='${node_ip}' MARIADB_BASE_DIR='${MARIADB_BASE_DIR}' ZFS_POOL_NAME='${ZFS_POOL_NAME}' BACKUP_BASE_DIR='${BACKUP_BASE_DIR}' HEALTH_LAG_WARN='${HEALTH_LAG_WARN:-30}' HEALTH_DISK_WARN='${HEALTH_DISK_WARN:-85}' HEALTH_LONG_TRX_WARN='${HEALTH_LONG_TRX_WARN:-600}' bash --noprofile --norc -s" -- <<'REMOTE'
 set -euo pipefail
 
 section() { printf '===== %s =====\n' "$*"; }
@@ -587,41 +590,32 @@ p()       { printf '%s\n' "$*"; }
 
 STATUS="OK"
 
-# Resolve mariadb client path (bypass aliases/functions)
+# Resolve mariadb client (absolute path to avoid aliases/functions)
 MYSQL_BIN="$(command -v mariadb 2>/dev/null || true)"
-HAS_MYSQL="no"
-[ -n "${MYSQL_BIN:-}" ] && HAS_MYSQL="yes"
+HAS_MYSQL="no"; [ -n "${MYSQL_BIN:-}" ] && HAS_MYSQL="yes"
 
+# Thresholds
+: "${HEALTH_LAG_WARN:=30}"
+: "${HEALTH_DISK_WARN:=85}"
+: "${HEALTH_LONG_TRX_WARN:=600}"
+
+# Basic node stats
 HOST="$(hostname -f 2>/dev/null || hostname || echo unknown)"
 UPTIME="$(uptime -p 2>/dev/null || true)"
 LOADAVG="$(awk '{printf "%s %s %s",$1,$2,$3}' /proc/loadavg 2>/dev/null || true)"
 CPU="$(nproc 2>/dev/null || echo "?")"
-MEM="$(free -m 2>/dev/null | awk '/Mem:/ {printf "%s/%sMB used",$3,$2}' || echo "-")"
-DISK="$(df -h "${MARIADB_BASE_DIR}" 2>/dev/null | awk 'NR==2{print $5" used of "$2" ("$4" free) on "$6}' || echo "-")"
+MEM_USED_PCT="$(free -m 2>/dev/null | awk '/Mem:/ {printf "%.0f", ($3/$2)*100}' || echo "-")"
+DISK_LINE="$(df -P "${MARIADB_BASE_DIR}" 2>/dev/null | awk 'NR==2{print $0}' || true)"
+DISK_PCT="$(printf '%s\n' "${DISK_LINE}" | awk '{gsub(/%/,"",$5); print $5}' || echo "-")"
+DISK_HUMAN="$(printf '%s\n' "${DISK_LINE}" | awk '{print $5" used of "$2" ("$4" free) on "$6}' || echo "-")"
 
-# ZFS health (accept "is healthy" or "all pools are healthy")
+# ZFS summary
 ZPOOL_STATE="$(command -v zpool >/dev/null 2>&1 && zpool list -H -o health "${ZFS_POOL_NAME}" 2>/dev/null || echo "-")"
 ZPOOL_STATUS_X="$(command -v zpool >/dev/null 2>&1 && zpool status -x "${ZFS_POOL_NAME}" 2>/dev/null || echo "-")"
 COMPRESS="$(command -v zfs >/dev/null 2>&1 && zfs get -H -o value compression "${ZFS_POOL_NAME}" 2>/dev/null || echo "-")"
 COMPRESSR="$(command -v zfs >/dev/null 2>&1 && zfs get -H -o value compressratio "${ZFS_POOL_NAME}" 2>/dev/null || echo "-")"
-
-# Map pool state to overall status
-case "${ZPOOL_STATE}" in
-  ONLINE|HEALTHY) : ;;
-  DEGRADED) STATUS="DEGRADED" ;;
-  FAULTED|OFFLINE|UNAVAIL|SUSPENDED) STATUS="FAIL" ;;
-  *) : ;;
-esac
-
-# Interpret status -x text more flexibly
-if [ "${ZPOOL_STATUS_X}" != "-" ] && [ -n "${ZPOOL_STATUS_X}" ]; then
-  if echo "${ZPOOL_STATUS_X}" | grep -qiE 'all pools are healthy|is healthy|no pools available'; then
-    : # healthy/ok
-  else
-    STATUS="DEGRADED"
-    ZFS_DETAIL="ZFS status: ${ZPOOL_STATUS_X}"
-  fi
-fi
+DATA_RS="$(command -v zfs >/dev/null 2>&1 && zfs get -H -o value recordsize "${ZFS_POOL_NAME}/data" 2>/dev/null || echo "-")"
+LOG_RS="$(command -v zfs >/dev/null 2>&1 && zfs get -H -o value recordsize "${ZFS_POOL_NAME}/log" 2>/dev/null || echo "-")"
 
 # Service state
 MYSVC="inactive"
@@ -633,77 +627,95 @@ fi
 # Port open?
 PORT_OPEN="unknown"
 if command -v ss >/dev/null 2>&1; then
-  if ss -lnt '( sport = :3306 )' 2>/dev/null | tail -n +2 | head -n1 >/dev/null; then
-    PORT_OPEN="yes"
-  else
-    PORT_OPEN="no"
-  fi
+  if ss -lnt '( sport = :3306 )' 2>/dev/null | tail -n +2 | head -n1 >/dev/null; then PORT_OPEN="yes"; else PORT_OPEN="no"; fi
 elif command -v netstat >/dev/null 2>&1; then
-  if netstat -lnt 2>/dev/null | awk '$4 ~ /:3306$/' | head -n1 >/dev/null; then
-    PORT_OPEN="yes"
-  else
-    PORT_OPEN="no"
+  if netstat -lnt 2>/dev/null | awk '$4 ~ /:3306$/' | head -n1 >/dev/null; then PORT_OPEN="yes"; else PORT_OPEN="no"; fi
+fi
+
+# MariaDB bits
+MYSQLVER="-"; ROLE="unknown"; READ_ONLY="?"
+TRUN="-"; TCONN="-"; MAX_CONN="-"
+LONG_TRX="-"
+MBIN=""; MPOS=""; GCUR="-"
+SIO=""; SSQL=""; SBEHIND=""; SGTID=""; GIOP=""; LIOE=""; LSQL=""
+
+if [ "$HAS_MYSQL" = "yes" ]; then
+  MYSQLVER="$("$MYSQL_BIN" --version 2>/dev/null | awk '{print $3,$4}')"; [ -n "${MYSQLVER:-}" ] || MYSQLVER="-"
+  READ_ONLY="$("$MYSQL_BIN" -Nse "SELECT @@read_only" 2>/dev/null || true)"; [ -n "${READ_ONLY:-}" ] || READ_ONLY="?"
+  [ "$READ_ONLY" = "0" ] && ROLE="Primary"
+
+  # Threads / capacity
+  TCONN="$("$MYSQL_BIN" -Nse "SHOW GLOBAL STATUS LIKE 'Threads_connected'" 2>/dev/null | awk '{print $2}')" || true
+  TRUN="$("$MYSQL_BIN" -Nse "SHOW GLOBAL STATUS LIKE 'Threads_running'"  2>/dev/null | awk '{print $2}')" || true
+  MAX_CONN="$("$MYSQL_BIN" -Nse "SHOW GLOBAL VARIABLES LIKE 'max_connections'" 2>/dev/null | awk '{print $2}')" || true
+  [ -n "${TCONN:-}" ] || TCONN="-"; [ -n "${TRUN:-}" ] || TRUN="-"; [ -n "${MAX_CONN:-}" ] || MAX_CONN="-"
+
+  # Longest open trx (seconds)
+  LONG_TRX="$("$MYSQL_BIN" -Nse "SELECT IFNULL(MAX(TIMESTAMPDIFF(SECOND,trx_started,NOW())),0) FROM information_schema.innodb_trx" 2>/dev/null || true)"
+  [ -n "${LONG_TRX:-}" ] || LONG_TRX="-"
+
+  # Replica status
+  SLAVE_RAW="$("$MYSQL_BIN" -e 'SHOW SLAVE STATUS\G' 2>/dev/null || true)"
+  if [ -n "$SLAVE_RAW" ]; then
+    ROLE="Replica"
+    SIO="$(awk -F': ' '/Slave_IO_Running:/        {print $2}' <<<"$SLAVE_RAW")"
+    SSQL="$(awk -F': ' '/Slave_SQL_Running:/      {print $2}' <<<"$SLAVE_RAW")"
+    SBEHIND="$(awk -F': ' '/Seconds_Behind_Master:/ {print $2}' <<<"$SLAVE_RAW")"
+    [ -z "${SBEHIND:-}" ] || [ "$SBEHIND" = "NULL" ] && SBEHIND=0
+    SGTID="$(awk -F': ' '/Using_Gtid:/            {print $2}' <<<"$SLAVE_RAW")"
+    GIOP="$(awk -F': ' '/Gtid_IO_Pos:/            {print $2}' <<<"$SLAVE_RAW")"
+    LIOE="$(awk -F': ' '/Last_IO_Error:/          {print $2}' <<<"$SLAVE_RAW")"
+    LSQL="$(awk -F': ' '/Last_SQL_Error:/         {print $2}' <<<"$SLAVE_RAW")"
+  fi
+
+  # Primary-only extras
+  if [ "$ROLE" = "Primary" ]; then
+    MS="$("$MYSQL_BIN" -e 'SHOW MASTER STATUS\G' 2>/dev/null || true)"
+    MBIN="$(awk -F': ' '/File:/     {print $2}' <<<"$MS")"
+    MPOS="$(awk -F': ' '/Position:/ {print $2}' <<<"$MS")"
+    GCUR="$("$MYSQL_BIN" -Nse 'SELECT @@gtid_current_pos' 2>/dev/null || true)"; [ -n "${GCUR:-}" ] || GCUR="-"
+
+    # Latest backup snapshot (dir + GTID)
+    LAST_BACK="-"
+    if [ -n "${BACKUP_BASE_DIR:-}" ] && [ -d "${BACKUP_BASE_DIR}" ]; then
+      LAST_BACK_DIR="$(ls -1dt "${BACKUP_BASE_DIR}"/backup-* 2>/dev/null | head -1 || true)"
+      if [ -n "${LAST_BACK_DIR:-}" ] && [ -f "${LAST_BACK_DIR}/mariadb_backup_binlog_info" ]; then
+        SNAP_GTID="$(awk '{print $3}' "${LAST_BACK_DIR}/mariadb_backup_binlog_info" 2>/dev/null || true)"
+        LAST_BACK="$(basename "${LAST_BACK_DIR}")/${SNAP_GTID:-?}"
+      fi
+    fi
   fi
 fi
 
-# MariaDB details
-MYSQLVER="-"
-ROLE="unknown"
-READ_ONLY="?"
-
-if [ "$HAS_MYSQL" = "yes" ]; then
-  MYSQLVER="$("$MYSQL_BIN" --version 2>/dev/null | awk '{print $3,$4}')"
-  [ -n "${MYSQLVER:-}" ] || MYSQLVER="-"
-
-  READ_ONLY="$("$MYSQL_BIN" -Nse "SELECT @@read_only" 2>/dev/null || true)"
-  [ -n "${READ_ONLY:-}" ] || READ_ONLY="?"
-  [ "$READ_ONLY" = "0" ] && ROLE="Primary"
-fi
-
-SLAVE_RAW=""
-if [ "$HAS_MYSQL" = "yes" ]; then
-  SLAVE_RAW="$("$MYSQL_BIN" -e 'SHOW SLAVE STATUS\G' 2>/dev/null || true)"
-fi
-
-if [ -n "$SLAVE_RAW" ]; then
-  ROLE="Replica"
-  SIO="$(awk -F': ' '/Slave_IO_Running:/        {print $2}' <<<"$SLAVE_RAW")"
-  SSQL="$(awk -F': ' '/Slave_SQL_Running:/      {print $2}' <<<"$SLAVE_RAW")"
-  SBEHIND="$(awk -F': ' '/Seconds_Behind_Master:/ {print $2}' <<<"$SLAVE_RAW")"
-  [ -z "${SBEHIND:-}" ] || [ "$SBEHIND" = "NULL" ] && SBEHIND=0
-  SGTID="$(awk -F': ' '/Using_Gtid:/            {print $2}' <<<"$SLAVE_RAW")"
-  GIOP="$(awk -F': ' '/Gtid_IO_Pos:/            {print $2}' <<<"$SLAVE_RAW")"
-  LIOE="$(awk -F': ' '/Last_IO_Error:/          {print $2}' <<<"$SLAVE_RAW")"
-  LSQL="$(awk -F': ' '/Last_SQL_Error:/         {print $2}' <<<"$SLAVE_RAW")"
+# Threshold-based degradations
+if [ "$MYSVC" != "active" ]; then STATUS="FAIL"; fi
+if [ "$ROLE" = "Replica" ]; then
   if [ "${SIO:-No}${SSQL:-No}" != "YesYes" ]; then STATUS="DEGRADED"; fi
-  if [ -n "${LIOE:-}" ] && [ "$LIOE" != "" ]; then STATUS="DEGRADED"; fi
-  if [ -n "${LSQL:-}" ] && [ "$LSQL" != "" ]; then STATUS="DEGRADED"; fi
+  if [ -n "${SBEHIND:-}" ] && [ "${SBEHIND:-0}" -gt "${HEALTH_LAG_WARN}" ]; then STATUS="DEGRADED"; fi
 fi
+if [ -n "${DISK_PCT:-}" ] && [ "${DISK_PCT:-0}" -ge "${HEALTH_DISK_WARN}" ]; then STATUS="DEGRADED"; fi
+if [ -n "${LONG_TRX:-}" ] && [ "${LONG_TRX:-0}" -ge "${HEALTH_LONG_TRX_WARN}" ]; then STATUS="DEGRADED"; fi
+if [ "$ZPOOL_STATUS_X" != "all pools are healthy" ] && [ "$ZPOOL_STATUS_X" != "-" ]; then STATUS="DEGRADED"; fi
 
-if [ "$ROLE" = "Primary" ] && [ "$HAS_MYSQL" = "yes" ]; then
-  MS="$("$MYSQL_BIN" -e 'SHOW MASTER STATUS\G' 2>/dev/null || true)"
-  MBIN="$(awk -F': ' '/File:/     {print $2}' <<<"$MS")"
-  MPOS="$(awk -F': ' '/Position:/ {print $2}' <<<"$MS")"
-  GCUR="$("$MYSQL_BIN" -Nse 'SELECT @@gtid_current_pos' 2>/dev/null || true)"
-  [ -n "${GCUR:-}" ] || GCUR="-"
-fi
-
+# Output
 section "Node: $HOST"
 p "IP: ${NODE_IP:-unknown}"
 p "Uptime: $UPTIME"
-p "Load(1/5/15): $LOADAVG  | CPU: ${CPU}c  | Mem: $MEM"
+p "Load(1/5/15): $LOADAVG  | CPU: ${CPU}c  | MemUsed: ${MEM_USED_PCT}%"
 p "MariaDB: service=$MYSVC  version=$MYSQLVER  port_open=$PORT_OPEN"
 p "Role: $ROLE  read_only=$READ_ONLY"
+p "Threads: connected=${TCONN} running=${TRUN} max=${MAX_CONN}"
 if [ "$ROLE" = "Replica" ]; then
-  p "Replica: IO=${SIO:-?}  SQL=${SSQL:-?}  Behind=${SBEHIND:-?}  Using_Gtid=${SGTID:-?}  Gtid_IO_Pos=${GIOP:-?}"
+  p "Replica: IO=${SIO:-?}  SQL=${SSQL:-?}  Lag=${SBEHIND:-?}s  Using_Gtid=${SGTID:-?}  Gtid_IO_Pos=${GIOP:-?}"
   p "Errors: Last_IO='${LIOE:-}'  Last_SQL='${LSQL:-}'"
 fi
 if [ "$ROLE" = "Primary" ]; then
   p "Primary: Binlog=${MBIN:-}  Pos=${MPOS:-}  gtid_current_pos=${GCUR:-}"
+  [ -n "${LAST_BACK:-}" ] && p "Last backup: ${LAST_BACK}"
 fi
-p "ZFS: pool_health=${ZPOOL_STATE}  compression=${COMPRESS}  compressratio=${COMPRESSR}"
-[ -n "${ZFS_DETAIL:-}" ] && p "${ZFS_DETAIL}"
-p "Data FS: ${DISK}"
+p "ZFS: pool_health=${ZPOOL_STATE}  compression=${COMPRESS}  compressratio=${COMPRESSR}  data.recordsize=${DATA_RS}  log.recordsize=${LOG_RS}"
+p "Data FS: ${DISK_HUMAN}"
+p "InnoDB: longest_open_trx=${LONG_TRX}s (warn>=${HEALTH_LONG_TRX_WARN}s)"
 printf 'HEALTH_RESULT:%s\n' "$STATUS"
 REMOTE
     )
