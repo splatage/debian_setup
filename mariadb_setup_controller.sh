@@ -221,14 +221,17 @@ warn() { echo "[REMOTE] WARN: \$1"; }
 success() { echo "[REMOTE] SUCCESS: \$1"; }
 
 info "Stopping any existing mariadb instances"
-systemctl stop mariadb || true
+if systemctl list-unit-files | grep -q '^mariadb\.service'; then
+  systemctl is-active --quiet mariadb && systemctl stop mariadb || true
+  systemctl is-enabled --quiet mariadb && systemctl disable mariadb || true
+fi
 
 info "Running initial setup on ${node_ip}"
 if zpool list "${ZFS_POOL_NAME}" &>/dev/null; then
   warn "ZFS pool '${ZFS_POOL_NAME}' already exists. Destroying and recreating to ensure a clean state."
   zpool destroy -f "${ZFS_POOL_NAME}"
   info "Recreating ZFS pool ${ZFS_POOL_NAME} on ${ZFS_DEVICE}"
-  zpool create "${ZFS_POOL_NAME}" "${ZFS_DEVICE}" -f
+  zpool create -f "${ZFS_POOL_NAME}" "${ZFS_DEVICE}"
   zfs set mountpoint="${MARIADB_BASE_DIR}" "${ZFS_POOL_NAME}"
   zfs set compression=lz4 atime=off logbias=throughput "${ZFS_POOL_NAME}"
   zfs create -o mountpoint="${MARIADB_BASE_DIR}/data" \
@@ -239,7 +242,7 @@ if zpool list "${ZFS_POOL_NAME}" &>/dev/null; then
   success "ZFS setup complete."
 else
   info "Creating ZFS pool ${ZFS_POOL_NAME} on ${ZFS_DEVICE}"
-  zpool create "${ZFS_POOL_NAME}" "${ZFS_DEVICE}" -f
+  zpool create -f "${ZFS_POOL_NAME}" "${ZFS_DEVICE}"
   zfs set mountpoint="${MARIADB_BASE_DIR}" "${ZFS_POOL_NAME}"
   zfs set compression=lz4 atime=off logbias=throughput "${ZFS_POOL_NAME}"
   zfs create -o mountpoint="${MARIADB_BASE_DIR}/data" \
@@ -251,6 +254,7 @@ else
 fi
 
 info "Installing MariaDB..."
+export DEBIAN_FRONTEND=noninteractive
 apt-get update >/dev/null
 apt-get install -y curl >/dev/null
 curl -LsSO https://r.mariadb.com/downloads/mariadb_repo_setup
@@ -366,6 +370,7 @@ mariabackup --copy-back --target-dir="${BACKUP_BASE_DIR}/${backdir_name}"
 chown -R mysql:mysql "${MARIADB_BASE_DIR}"
 
 info "Starting MariaDB service..."
+systemctl daemon-reload || true
 systemctl start mariadb
 systemctl enable mariadb
 success "Restore complete. MariaDB started."
@@ -486,8 +491,10 @@ switchover_roles() {
     while [[ ${behind} -ne 0 && ${count} -lt 60 ]]; do
       behind=$(ssh "${SSH_USER}@${replica_ip}" \
         "mariadb -e 'SHOW SLAVE STATUS\G'" | \
-        grep 'Seconds_Behind_Master:' | awk '{print $2}')
-      if [[ "${behind}" == "0" ]]; then
+        awk -F': ' '/Seconds_Behind_Master:/ {print $2}')
+      # Treat NULL/empty as 0 for comparison
+      if [[ -z "${behind}" || "${behind}" == "NULL" ]]; then behind=0; fi
+      if [[ "${behind}" -eq 0 ]]; then
         break
       fi
       echo "  - ${replica_ip} is ${behind} seconds behind master. Waiting..."
