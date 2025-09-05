@@ -570,7 +570,6 @@ EOF
 # Health check across PRIMARY + all REPLICAS.
 # Read-only: reports service, replication, load, disk, ZFS.
 #######################################
-
 health_check() {
   info "Running health check across MariaDB cluster..."
   local all_ips=("${PRIMARY_IP}" "${REPLICA_IP_LIST[@]}")
@@ -580,11 +579,11 @@ health_check() {
     info "Probing ${node_ip}..."
     local report
     report=$(ssh -o ConnectTimeout=5 "${SSH_USER}@${node_ip}" \
-      "NODE_IP='${node_ip}' MARIADB_BASE_DIR='${MARIADB_BASE_DIR}' ZFS_POOL_NAME='${ZFS_POOL_NAME}' bash -s" -- <<REMOTE
+      "NODE_IP='${node_ip}' MARIADB_BASE_DIR='${MARIADB_BASE_DIR}' ZFS_POOL_NAME='${ZFS_POOL_NAME}' bash -s" -- <<'REMOTE'
 set -euo pipefail
 
-section() { builtin printf '===== %s =====\n' "$*"; }
-p()       { builtin printf '%s\n' "$*"; }
+section() { printf '===== %s =====\n' "$*"; }
+p()       { printf '%s\n' "$*"; }
 
 STATUS="OK"
 
@@ -621,14 +620,14 @@ READ_ONLY="$(mariadb -Nse "SELECT @@read_only" 2>/dev/null || echo "?")"
 SLAVE_RAW="$(mariadb -e 'SHOW SLAVE STATUS\G' 2>/dev/null || true)"
 if [ -n "$SLAVE_RAW" ]; then
   ROLE="Replica"
-  SIO="$(printf '%s\n' "$SLAVE_RAW" | awk -F': ' '/Slave_IO_Running:/ {print $2}')"
-  SSQL="$(printf '%s\n' "$SLAVE_RAW" | awk -F': ' '/Slave_SQL_Running:/ {print $2}')"
-  SBEHIND="$(printf '%s\n' "$SLAVE_RAW" | awk -F': ' '/Seconds_Behind_Master:/ {print $2}')"
+  SIO="$(awk -F': ' '/Slave_IO_Running:/       {print $2}' <<<"$SLAVE_RAW")"
+  SSQL="$(awk -F': ' '/Slave_SQL_Running:/     {print $2}' <<<"$SLAVE_RAW")"
+  SBEHIND="$(awk -F': ' '/Seconds_Behind_Master:/ {print $2}' <<<"$SLAVE_RAW")"
   [ -z "$SBEHIND" ] || [ "$SBEHIND" = "NULL" ] && SBEHIND=0
-  SGTID="$(printf '%s\n' "$SLAVE_RAW" | awk -F': ' '/Using_Gtid:/ {print $2}')"
-  GIOP="$(printf '%s\n' "$SLAVE_RAW" | awk -F': ' '/Gtid_IO_Pos:/ {print $2}')"
-  LIOE="$(printf '%s\n' "$SLAVE_RAW" | awk -F': ' '/Last_IO_Error:/ {print $2}')"
-  LSQL="$(printf '%s\n' "$SLAVE_RAW" | awk -F': ' '/Last_SQL_Error:/ {print $2}')"
+  SGTID="$(awk -F': ' '/Using_Gtid:/           {print $2}' <<<"$SLAVE_RAW")"
+  GIOP="$(awk -F': ' '/Gtid_IO_Pos:/           {print $2}' <<<"$SLAVE_RAW")"
+  LIOE="$(awk -F': ' '/Last_IO_Error:/         {print $2}' <<<"$SLAVE_RAW")"
+  LSQL="$(awk -F': ' '/Last_SQL_Error:/        {print $2}' <<<"$SLAVE_RAW")"
   if [ "$SIO$SSQL" != "YesYes" ]; then STATUS="DEGRADED"; fi
   if [ -n "${LIOE:-}" ] && [ "$LIOE" != "" ]; then STATUS="DEGRADED"; fi
   if [ -n "${LSQL:-}" ] && [ "$LSQL" != "" ]; then STATUS="DEGRADED"; fi
@@ -636,8 +635,8 @@ fi
 
 if [ "$ROLE" = "Primary" ]; then
   MS="$(mariadb -e 'SHOW MASTER STATUS\G' 2>/dev/null || true)"
-  MBIN="$(printf '%s\n' "$MS" | awk -F': ' '/File:/ {print $2}')"
-  MPOS="$(printf '%s\n' "$MS" | awk -F': ' '/Position:/ {print $2}')"
+  MBIN="$(awk -F': ' '/File:/     {print $2}' <<<"$MS")"
+  MPOS="$(awk -F': ' '/Position:/ {print $2}' <<<"$MS")"
   GCUR="$(mariadb -Nse 'SELECT @@gtid_current_pos' 2>/dev/null || echo "-")"
 fi
 
@@ -660,7 +659,7 @@ if [ "$ZPOOL_STATUS_X" != "all pools are healthy" ] && [ "$ZPOOL_STATUS_X" != "-
   p "ZFS status: ${ZPOOL_STATUS_X}"
 fi
 p "Data FS: ${DISK}"
-builtin printf 'HEALTH_RESULT:%s\n' "$STATUS"
+printf 'HEALTH_RESULT:%s\n' "$STATUS"
 REMOTE
     )
     echo "${report}"
