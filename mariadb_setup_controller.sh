@@ -221,7 +221,7 @@ warn() { echo "[REMOTE] WARN: \$1"; }
 success() { echo "[REMOTE] SUCCESS: \$1"; }
 
 info "Stopping any existing mariadb instances"
-systemctl stop mariadb
+systemctl stop mariadb || true
 
 info "Running initial setup on ${node_ip}"
 if zpool list "${ZFS_POOL_NAME}" &>/dev/null; then
