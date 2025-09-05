@@ -570,9 +570,7 @@ EOF
 # Health check across PRIMARY + all REPLICAS.
 # Read-only: reports service, replication, load, disk, ZFS.
 #######################################
-#######################################
-# Health check across PRIMARY + all REPLICAS (read-only).
-#######################################
+
 health_check() {
   info "Running health check across MariaDB cluster..."
   local all_ips=("${PRIMARY_IP}" "${REPLICA_IP_LIST[@]}")
