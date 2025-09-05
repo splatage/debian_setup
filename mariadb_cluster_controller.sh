@@ -599,36 +599,54 @@ ZPOOL_STATUS_X="$(command -v zpool >/dev/null 2>&1 && zpool status -x "${ZFS_POO
 COMPRESS="$(command -v zfs >/dev/null 2>&1 && zfs get -H -o value compression "${ZFS_POOL_NAME}" 2>/dev/null || echo "-")"
 COMPRESSR="$(command -v zfs >/dev/null 2>&1 && zfs get -H -o value compressratio "${ZFS_POOL_NAME}" 2>/dev/null || echo "-")"
 
-# Service status (nounset-safe)
+# Service state (nounset-safe)
 MYSVC="inactive"
-if systemctl is-active --quiet mariadb 2>/dev/null; then
+if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet mariadb 2>/dev/null; then
   MYSVC="active"
 fi
 [ "$MYSVC" = "active" ] || STATUS="FAIL"
 
 # Port open?
-PORT_OPEN="no"
+PORT_OPEN="unknown"
 if command -v ss >/dev/null 2>&1; then
   if ss -lnt '( sport = :3306 )' 2>/dev/null | tail -n +2 | head -n1 >/dev/null; then
     PORT_OPEN="yes"
+  else
+    PORT_OPEN="no"
   fi
 elif command -v netstat >/dev/null 2>&1; then
   if netstat -lnt 2>/dev/null | awk '$4 ~ /:3306$/' | head -n1 >/dev/null; then
     PORT_OPEN="yes"
+  else
+    PORT_OPEN="no"
   fi
-else
-  PORT_OPEN="unknown"
 fi
 
-MYSQLVER="$(( mariadb --version 2>/dev/null || true ) | awk '{print $3,$4}')"
-[ -n "${MYSQLVER:-}" ] || MYSQLVER="-"
+# MariaDB client available?
+HAS_MYSQL="no"
+if command -v mariadb >/dev/null 2>&1; then
+  HAS_MYSQL="yes"
+fi
+
+MYSQLVER="-"
+if [ "$HAS_MYSQL" = "yes" ]; then
+  MYSQLVER="$(mariadb --version 2>/dev/null | awk '{print $3,$4}')"
+  [ -n "${MYSQLVER:-}" ] || MYSQLVER="-"
+fi
 
 ROLE="unknown"
-READ_ONLY="$(( mariadb -Nse "SELECT @@read_only" 2>/dev/null || true ))"
-[ -n "${READ_ONLY:-}" ] || READ_ONLY="?"
-[ "$READ_ONLY" = "0" ] && ROLE="Primary"
+READ_ONLY="?"
+if [ "$HAS_MYSQL" = "yes" ]; then
+  READ_ONLY="$(mariadb -Nse "SELECT @@read_only" 2>/dev/null || true)"
+  [ -n "${READ_ONLY:-}" ] || READ_ONLY="?"
+  [ "$READ_ONLY" = "0" ] && ROLE="Primary"
+fi
 
-SLAVE_RAW="$(( mariadb -e 'SHOW SLAVE STATUS\G' 2>/dev/null || true ))"
+SLAVE_RAW=""
+if [ "$HAS_MYSQL" = "yes" ]; then
+  SLAVE_RAW="$(mariadb -e 'SHOW SLAVE STATUS\G' 2>/dev/null || true)"
+fi
+
 if [ -n "$SLAVE_RAW" ]; then
   ROLE="Replica"
   SIO="$(awk -F': ' '/Slave_IO_Running:/        {print $2}' <<<"$SLAVE_RAW")"
@@ -644,11 +662,11 @@ if [ -n "$SLAVE_RAW" ]; then
   if [ -n "${LSQL:-}" ] && [ "$LSQL" != "" ]; then STATUS="DEGRADED"; fi
 fi
 
-if [ "$ROLE" = "Primary" ]; then
-  MS="$(( mariadb -e 'SHOW MASTER STATUS\G' 2>/dev/null || true ))"
+if [ "$ROLE" = "Primary" ] && [ "$HAS_MYSQL" = "yes" ]; then
+  MS="$(mariadb -e 'SHOW MASTER STATUS\G' 2>/dev/null || true)"
   MBIN="$(awk -F': ' '/File:/     {print $2}' <<<"$MS")"
   MPOS="$(awk -F': ' '/Position:/ {print $2}' <<<"$MS")"
-  GCUR="$(( mariadb -Nse 'SELECT @@gtid_current_pos' 2>/dev/null || true ))"
+  GCUR="$(mariadb -Nse 'SELECT @@gtid_current_pos' 2>/dev/null || true)"
   [ -n "${GCUR:-}" ] || GCUR="-"
 fi
 
@@ -688,6 +706,7 @@ REMOTE
     success "All nodes healthy."
   fi
 }
+
 
 #######################################
 # Main execution logic for the script.
