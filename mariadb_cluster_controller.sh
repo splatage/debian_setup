@@ -583,7 +583,7 @@ health_check() {
       "NODE_IP='${node_ip}' MARIADB_BASE_DIR='${MARIADB_BASE_DIR}' ZFS_POOL_NAME='${ZFS_POOL_NAME}' bash -s" -- <<REMOTE
 set -euo pipefail
 
-section() { builtin printf '----- %s -----\n' "$*"; }
+section() { builtin printf '===== %s =====\n' "$*"; }
 p()       { builtin printf '%s\n' "$*"; }
 
 STATUS="OK"
