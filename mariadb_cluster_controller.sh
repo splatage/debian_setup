@@ -570,6 +570,9 @@ EOF
 # Health check across PRIMARY + all REPLICAS.
 # Read-only: reports service, replication, load, disk, ZFS.
 #######################################
+#######################################
+# Health check across PRIMARY + all REPLICAS (read-only).
+#######################################
 health_check() {
   info "Running health check across MariaDB cluster..."
   local all_ips=("${PRIMARY_IP}" "${REPLICA_IP_LIST[@]}")
@@ -579,15 +582,15 @@ health_check() {
     info "Probing ${node_ip}..."
     local report
     report=$(ssh -o ConnectTimeout=5 "${SSH_USER}@${node_ip}" \
-      "MARIADB_BASE_DIR='${MARIADB_BASE_DIR}' ZFS_POOL_NAME='${ZFS_POOL_NAME}' bash -s" -- <<'REMOTE'
+      "NODE_IP='${node_ip}' MARIADB_BASE_DIR='${MARIADB_BASE_DIR}' ZFS_POOL_NAME='${ZFS_POOL_NAME}' bash -s" -- <<'REMOTE'
 set -euo pipefail
 
-section() { printf "----- %s -----\n" "$*"; }
-p() { printf "%s\n" "$*"; }
+section() { builtin printf '----- %s -----\n' "$*"; }
+p()       { builtin printf '%s\n' "$*"; }
 
 STATUS="OK"
 
-HOST="$(hostname -f 2>/dev/null || hostname)"
+HOST="$(hostname -f 2>/dev/null || hostname || echo unknown)"
 UPTIME="$(uptime -p 2>/dev/null || true)"
 LOADAVG="$(awk '{printf "%s %s %s",$1,$2,$3}' /proc/loadavg 2>/dev/null || true)"
 CPU="$(nproc 2>/dev/null || echo "?")"
@@ -602,11 +605,15 @@ COMPRESSR="$(command -v zfs >/dev/null 2>&1 && zfs get -H -o value compressratio
 MYSVC="$(systemctl is-active mariadb 2>/dev/null || echo inactive)"
 [ "$MYSVC" = "active" ] || STATUS="FAIL"
 
-PORT_OPEN="$(
-  if command -v ss >/dev/null 2>&1; then ss -lnt '( sport = :3306 )' | tail -n +2; 
-  elif command -v netstat >/dev/null 2>&1; then netstat -lnt 2>/dev/null | awk '$4 ~ /:3306$/'; 
-  fi
-)"
+# Port open?
+if command -v ss >/dev/null 2>&1; then
+  PORT_OPEN="$(ss -lnt '( sport = :3306 )' 2>/dev/null | tail -n +2)"
+elif command -v netstat >/dev/null 2>&1; then
+  PORT_OPEN="$(netstat -lnt 2>/dev/null | awk '$4 ~ /:3306$/')"
+else
+  PORT_OPEN=""
+fi
+
 MYSQLVER="$(mariadb --version 2>/dev/null | awk '{print $3,$4}' || echo "-")"
 
 ROLE="unknown"
@@ -616,28 +623,28 @@ READ_ONLY="$(mariadb -Nse "SELECT @@read_only" 2>/dev/null || echo "?")"
 SLAVE_RAW="$(mariadb -e 'SHOW SLAVE STATUS\G' 2>/dev/null || true)"
 if [ -n "$SLAVE_RAW" ]; then
   ROLE="Replica"
-  SIO="$(printf "%s\n" "$SLAVE_RAW" | awk -F': ' '/Slave_IO_Running:/ {print $2}')"
-  SSQL="$(printf "%s\n" "$SLAVE_RAW" | awk -F': ' '/Slave_SQL_Running:/ {print $2}')"
-  SBEHIND="$(printf "%s\n" "$SLAVE_RAW" | awk -F': ' '/Seconds_Behind_Master:/ {print $2}')"
+  SIO="$(printf '%s\n' "$SLAVE_RAW" | awk -F': ' '/Slave_IO_Running:/ {print $2}')"
+  SSQL="$(printf '%s\n' "$SLAVE_RAW" | awk -F': ' '/Slave_SQL_Running:/ {print $2}')"
+  SBEHIND="$(printf '%s\n' "$SLAVE_RAW" | awk -F': ' '/Seconds_Behind_Master:/ {print $2}')"
   [ -z "$SBEHIND" ] || [ "$SBEHIND" = "NULL" ] && SBEHIND=0
-  SGTID="$(printf "%s\n" "$SLAVE_RAW" | awk -F': ' '/Using_Gtid:/ {print $2}')"
-  GIOP="$(printf "%s\n" "$SLAVE_RAW" | awk -F': ' '/Gtid_IO_Pos:/ {print $2}')"
-  LIOE="$(printf "%s\n" "$SLAVE_RAW" | awk -F': ' '/Last_IO_Error:/ {print $2}')"
-  LSQL="$(printf "%s\n" "$SLAVE_RAW" | awk -F': ' '/Last_SQL_Error:/ {print $2}')"
+  SGTID="$(printf '%s\n' "$SLAVE_RAW" | awk -F': ' '/Using_Gtid:/ {print $2}')"
+  GIOP="$(printf '%s\n' "$SLAVE_RAW" | awk -F': ' '/Gtid_IO_Pos:/ {print $2}')"
+  LIOE="$(printf '%s\n' "$SLAVE_RAW" | awk -F': ' '/Last_IO_Error:/ {print $2}')"
+  LSQL="$(printf '%s\n' "$SLAVE_RAW" | awk -F': ' '/Last_SQL_Error:/ {print $2}')"
   if [ "$SIO$SSQL" != "YesYes" ]; then STATUS="DEGRADED"; fi
-  if [ -n "$LIOE" ] && [ "$LIOE" != "" ]; then STATUS="DEGRADED"; fi
-  if [ -n "$LSQL" ] && [ "$LSQL" != "" ]; then STATUS="DEGRADED"; fi
+  if [ -n "${LIOE:-}" ] && [ "$LIOE" != "" ]; then STATUS="DEGRADED"; fi
+  if [ -n "${LSQL:-}" ] && [ "$LSQL" != "" ]; then STATUS="DEGRADED"; fi
 fi
 
 if [ "$ROLE" = "Primary" ]; then
   MS="$(mariadb -e 'SHOW MASTER STATUS\G' 2>/dev/null || true)"
-  MBIN="$(printf "%s\n" "$MS" | awk -F': ' '/File:/ {print $2}')"
-  MPOS="$(printf "%s\n" "$MS" | awk -F': ' '/Position:/ {print $2}')"
+  MBIN="$(printf '%s\n' "$MS" | awk -F': ' '/File:/ {print $2}')"
+  MPOS="$(printf '%s\n' "$MS" | awk -F': ' '/Position:/ {print $2}')"
   GCUR="$(mariadb -Nse 'SELECT @@gtid_current_pos' 2>/dev/null || echo "-")"
 fi
 
 section "Node: $HOST"
-p "IP: ${SSH_CONNECTION%% *}"
+p "IP: ${NODE_IP:-unknown}"
 p "Uptime: $UPTIME"
 p "Load(1/5/15): $LOADAVG  | CPU: ${CPU}c  | Mem: $MEM"
 p "MariaDB: service=$MYSVC  version=$MYSQLVER  port_open=$([ -n "$PORT_OPEN" ] && echo yes || echo no)"
@@ -655,7 +662,7 @@ if [ "$ZPOOL_STATUS_X" != "all pools are healthy" ] && [ "$ZPOOL_STATUS_X" != "-
   p "ZFS status: ${ZPOOL_STATUS_X}"
 fi
 p "Data FS: ${DISK}"
-printf "HEALTH_RESULT:%s\n" "$STATUS"
+builtin printf 'HEALTH_RESULT:%s\n' "$STATUS"
 REMOTE
     )
     echo "${report}"
@@ -672,6 +679,7 @@ REMOTE
     success "All nodes healthy."
   fi
 }
+
 
 #######################################
 # Main execution logic for the script.
