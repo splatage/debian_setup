@@ -94,7 +94,7 @@ It will configure and enable services to apply these settings automatically at e
 
 Server fan often react badly to non OEM hardware. This installs a service to put monitor temps and adjust fan speeds
 
-    curl -O https://github.com/splatage/debian_setup/raw/refs/heads/main/fan_temp_service.sh
+    curl -O https://raw.githubusercontent.com/splatage/debian_setup/refs/heads/main/fan_temp_service.sh
     bash fan_temp_service.sh
 
 ---
