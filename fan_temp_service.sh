@@ -38,11 +38,12 @@ write_script() {
 #!/bin/bash
 # /usr/local/sbin/fan_control.sh
 # Baseline-referenced fan control for IBM (step or linear hex) and Dell/Unisys (percent).
-# - Takes ONE SDR snapshot per loop and keeps it IN MEMORY (no /tmp cache).
-# - Uses the HOTTEST temperature reported by SDR to drive the fans.
-# - Reissues current speed just BEFORE each read (keepalive) to prevent BMC ramp.
-# - pct each cycle is based on TEMP vs BASELINE (not last delta), then clamped & slewed.
-# - IBM_CODEMAP: "table" (classic) or "linear" (0x12..0xFF).
+# - ONE SDR snapshot per loop, kept IN MEMORY.
+# - HOTTEST temperature drives control (PCH excluded as per last request).
+# - Post-read keepalive (reassert current speed immediately after SDR read).
+# - IBM bank handling:
+#     * If IBM_BANKS is set (e.g. "0x01" or "0x01 0x02"), auto-detection is BYPASSED and those banks are always used.
+#     * Otherwise, auto-detect CPU1/CPU2 presence each loop and write only to present banks.
 
 set -u -o pipefail
 IFS=$'\n\t'
@@ -69,6 +70,7 @@ DEADBAND_C=${DEADBAND_C:-0}     # °C around baseline to keep MIN_PCT (0=off)
 IBM_CODEMAP="${IBM_CODEMAP:-linear}"  # table|linear
 IBM_BANK1="${IBM_BANK1:-0x01}"
 IBM_BANK2="${IBM_BANK2:-0x02}"
+IBM_BANKS="${IBM_BANKS:-}"            # if non-empty, space-separated list of banks (e.g. "0x01 0x02") -> bypass detect
 
 # ------------ vendor detect ------------
 lower(){ tr '[:upper:]' '[:lower:]'; }
@@ -83,7 +85,7 @@ detect_vendor() {
   else echo ibm; fi
 }
 VENDOR="$(detect_vendor)"
-echo "[$(date +'%F %T')] start vendor=$VENDOR baseline=${BASELINE_C}C IBM_CODEMAP=${IBM_CODEMAP}"
+echo "[$(date +'%F %T')] start vendor=$VENDOR baseline=${BASELINE_C}C IBM_CODEMAP=${IBM_CODEMAP} IBM_BANKS='${IBM_BANKS}'"
 
 # ------------ SDR snapshot (in memory) ------------
 SDR=""
@@ -92,7 +94,7 @@ fetch_ipmi(){
 }
 
 # ------------ parsers using in-memory SDR ------------
-# Hottest temperature anywhere in SDR (robust numeric parse of last field)
+# Hottest temperature anywhere in SDR (exclude PCH)
 hottest_temp_any(){
   awk -F'|' '!/PCH/ {print $NF}' <<< "$SDR" \
   | sed -E 's/[^0-9.]//g;/^$/d' \
@@ -100,14 +102,22 @@ hottest_temp_any(){
   | awk '{printf "%d\n", ($1+0)}'
 }
 
-# IBM bank presence: CPU1/CPU2 with a real temperature reading
+# IBM bank presence: CPU1/CPU2 have a numeric temperature in the LAST field
 ibm_have_cpu1(){
-  awk -F'|' '($1 ~ /CPU[[:space:]]*1|CPU1/) && ($1 ~ /Temp/) && ($5 ~ /degrees[[:space:]]*C/i) {f=1}
-             END{if(f)print 1}' <<< "$SDR"
+  awk -F'|' '
+    BEGIN{IGNORECASE=1}
+    ($1 ~ /(CPU[[:space:]]*1|CPU1)/) && ($1 ~ /Temp/) {
+      f=$NF; gsub(/[^0-9.]/,"",f);
+      if (f != "") { print 1; exit }
+    }' <<< "$SDR"
 }
 ibm_have_cpu2(){
-  awk -F'|' '($1 ~ /CPU[[:space:]]*2|CPU2/) && ($1 ~ /Temp/) && ($5 ~ /degrees[[:space:]]*C/i) {f=1}
-             END{if(f)print 1}' <<< "$SDR"
+  awk -F'|' '
+    BEGIN{IGNORECASE=1}
+    ($1 ~ /(CPU[[:space:]]*2|CPU2)/) && ($1 ~ /Temp/) {
+      f=$NF; gsub(/[^0-9.]/,"",f);
+      if (f != "") { print 1; exit }
+    }' <<< "$SDR"
 }
 
 # ------------ % helpers ------------
@@ -144,7 +154,6 @@ ibm_hex_for_pct(){
   local p=$1
   (( p<0 )) && p=0; (( p>100 )) && p=100
   if [[ "$IBM_CODEMAP" = "linear" ]]; then
-    # 0..100% → 0x12..0xFF (rounded)
     local min_dec=$((16#12)) max_dec=$((16#FF)) span
     span=$(( max_dec - min_dec ))
     local code=$(( min_dec + (p * span + 50) / 100 ))
@@ -152,7 +161,6 @@ ibm_hex_for_pct(){
     (( code > max_dec )) && code=$max_dec
     printf "0x%02X\n" "$code"
   else
-    # classic steps
     if   (( p <= 0 ));  then echo 0x12
     elif (( p <= 25 )); then echo 0x30
     elif (( p <= 30 )); then echo 0x35
@@ -185,17 +193,30 @@ while true; do
     sleep "$INTERVAL"; continue
   fi
 
-  # 2) Learn which IBM banks exist from THIS snapshot
+  # 2) Decide the IBM banks to use this loop
+  BANKS=""
   if [[ "$VENDOR" == "ibm" ]]; then
-    HAVE1="$(ibm_have_cpu1 || true)"
-    HAVE2="$(ibm_have_cpu2 || true)"
+    if [[ -n "$IBM_BANKS" ]]; then
+      # Manual override: bypass detection entirely
+      BANKS="$IBM_BANKS"
+    else
+      # Auto-detect from snapshot
+      HAVE1="$(ibm_have_cpu1 || true)"
+      HAVE2="$(ibm_have_cpu2 || true)"
+      [[ -n "$HAVE1" ]] && BANKS="$BANKS $IBM_BANK1"
+      [[ -n "$HAVE2" ]] && BANKS="$BANKS $IBM_BANK2"
+      BANKS="${BANKS# }"
+    fi
   fi
 
-  # 3) Post-read keepalive: immediately re-assert current speed (mirrors your manual workflow)
+  # 3) Post-read keepalive: re-assert current speed
   if [[ "$VENDOR" == "ibm" ]]; then
     HX_KEEP="$(ibm_hex_for_pct "$CUR_PCT")"
-    [[ -n "$HAVE1" ]] && ipmitool raw 0x3a 0x07 "$IBM_BANK1" "$HX_KEEP" 0x01 >/dev/null 2>&1 || true
-    [[ -n "$HAVE2" ]] && ipmitool raw 0x3a 0x07 "$IBM_BANK2" "$HX_KEEP" 0x01 >/dev/null 2>&1 || true
+    if [[ -n "$BANKS" ]]; then
+      for b in $BANKS; do
+        ipmitool raw 0x3a 0x07 "$b" "$HX_KEEP" 0x01 >/dev/null 2>&1 || true
+      done
+    fi
   else
     set_dell_global "$CUR_PCT" >/dev/null 2>&1 || true
   fi
@@ -211,9 +232,14 @@ while true; do
   CUR_PCT="$(apply_slew "$CUR_PCT" "$WANT")"
 
   if [[ "$VENDOR" == "ibm" ]]; then
-    [[ -n "$HAVE1" ]] && set_ibm_bank "$IBM_BANK1" "$CUR_PCT"
-    [[ -n "$HAVE2" ]] && set_ibm_bank "$IBM_BANK2" "$CUR_PCT"
-    echo "[$(date +'%F %T')] IBM: HOT=${HOT}°C -> ${CUR_PCT}% (map=${IBM_CODEMAP}) banks=$([[ -n "$HAVE1" ]] && echo 1)$( [[ -n "$HAVE2" ]] && echo 2)"
+    if [[ -z "$BANKS" ]]; then
+      echo "[$(date +'%F %T')] IBM: no banks resolved (override empty + auto-detect found none). Skipping write."
+    else
+      for b in $BANKS; do
+        set_ibm_bank "$b" "$CUR_PCT"
+      done
+      echo "[$(date +'%F %T')] IBM: HOT=${HOT}°C -> ${CUR_PCT}% (map=${IBM_CODEMAP}) banks=$(echo $BANKS | tr ' ' ',')"
+    fi
   else
     set_dell_global "$CUR_PCT"
     echo "[$(date +'%F %T')] Dell/clone: HOT=${HOT}°C -> ${CUR_PCT}%"
@@ -234,7 +260,7 @@ write_defaults() {
 #BASELINE_C=45
 #UP_GAIN=2
 #DOWN_GAIN=1
-#MIN_PCT=0
+#MIN_PCT=5
 #MAX_PCT=60
 #SLEW_PCT=15
 #DEADBAND_C=0
@@ -242,7 +268,12 @@ write_defaults() {
 # IBM mapping: "table" (classic steps) or "linear" (0x12..0xFF)
 #IBM_CODEMAP=linear
 
-# IBM banks (usually fine as-is)
+# IBM banks (addresses). If set, auto-detection is BYPASSED and ONLY these banks are used.
+# Examples:
+#IBM_BANKS="0x01"
+#IBM_BANKS="0x01 0x02"
+
+# If you do NOT set IBM_BANKS, the script will auto-detect CPU banks each loop.
 #IBM_BANK1=0x01
 #IBM_BANK2=0x02
 DFEOF
