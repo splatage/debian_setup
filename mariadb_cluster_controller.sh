@@ -587,7 +587,7 @@ p()       { printf '%s\n' "$*"; }
 
 STATUS="OK"
 
-# Resolve mariadb client path (bypass aliases/functions entirely)
+# Resolve mariadb client path (bypass aliases/functions)
 MYSQL_BIN="$(command -v mariadb 2>/dev/null || true)"
 HAS_MYSQL="no"
 [ -n "${MYSQL_BIN:-}" ] && HAS_MYSQL="yes"
@@ -599,10 +599,29 @@ CPU="$(nproc 2>/dev/null || echo "?")"
 MEM="$(free -m 2>/dev/null | awk '/Mem:/ {printf "%s/%sMB used",$3,$2}' || echo "-")"
 DISK="$(df -h "${MARIADB_BASE_DIR}" 2>/dev/null | awk 'NR==2{print $5" used of "$2" ("$4" free) on "$6}' || echo "-")"
 
+# ZFS health (accept "is healthy" or "all pools are healthy")
 ZPOOL_STATE="$(command -v zpool >/dev/null 2>&1 && zpool list -H -o health "${ZFS_POOL_NAME}" 2>/dev/null || echo "-")"
 ZPOOL_STATUS_X="$(command -v zpool >/dev/null 2>&1 && zpool status -x "${ZFS_POOL_NAME}" 2>/dev/null || echo "-")"
 COMPRESS="$(command -v zfs >/dev/null 2>&1 && zfs get -H -o value compression "${ZFS_POOL_NAME}" 2>/dev/null || echo "-")"
 COMPRESSR="$(command -v zfs >/dev/null 2>&1 && zfs get -H -o value compressratio "${ZFS_POOL_NAME}" 2>/dev/null || echo "-")"
+
+# Map pool state to overall status
+case "${ZPOOL_STATE}" in
+  ONLINE|HEALTHY) : ;;
+  DEGRADED) STATUS="DEGRADED" ;;
+  FAULTED|OFFLINE|UNAVAIL|SUSPENDED) STATUS="FAIL" ;;
+  *) : ;;
+esac
+
+# Interpret status -x text more flexibly
+if [ "${ZPOOL_STATUS_X}" != "-" ] && [ -n "${ZPOOL_STATUS_X}" ]; then
+  if echo "${ZPOOL_STATUS_X}" | grep -qiE 'all pools are healthy|is healthy|no pools available'; then
+    : # healthy/ok
+  else
+    STATUS="DEGRADED"
+    ZFS_DETAIL="ZFS status: ${ZPOOL_STATUS_X}"
+  fi
+fi
 
 # Service state
 MYSVC="inactive"
@@ -627,6 +646,7 @@ elif command -v netstat >/dev/null 2>&1; then
   fi
 fi
 
+# MariaDB details
 MYSQLVER="-"
 ROLE="unknown"
 READ_ONLY="?"
@@ -682,10 +702,7 @@ if [ "$ROLE" = "Primary" ]; then
   p "Primary: Binlog=${MBIN:-}  Pos=${MPOS:-}  gtid_current_pos=${GCUR:-}"
 fi
 p "ZFS: pool_health=${ZPOOL_STATE}  compression=${COMPRESS}  compressratio=${COMPRESSR}"
-if [ "$ZPOOL_STATUS_X" != "all pools are healthy" ] && [ "$ZPOOL_STATUS_X" != "-" ]; then
-  STATUS="DEGRADED"
-  p "ZFS status: ${ZPOOL_STATUS_X}"
-fi
+[ -n "${ZFS_DETAIL:-}" ] && p "${ZFS_DETAIL}"
 p "Data FS: ${DISK}"
 printf 'HEALTH_RESULT:%s\n' "$STATUS"
 REMOTE
