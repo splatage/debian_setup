@@ -582,7 +582,7 @@ health_check() {
     info "Probing ${node_ip}..."
     local report
     report=$(ssh -o ConnectTimeout=5 "${SSH_USER}@${node_ip}" \
-      "NODE_IP='${node_ip}' MARIADB_BASE_DIR='${MARIADB_BASE_DIR}' ZFS_POOL_NAME='${ZFS_POOL_NAME}' bash -s" -- <<'REMOTE'
+      "NODE_IP='${node_ip}' MARIADB_BASE_DIR='${MARIADB_BASE_DIR}' ZFS_POOL_NAME='${ZFS_POOL_NAME}' bash -s" -- <<REMOTE
 set -euo pipefail
 
 section() { builtin printf '----- %s -----\n' "$*"; }
