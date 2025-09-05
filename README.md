@@ -104,7 +104,7 @@ Server fan often react badly to non OEM hardware. This installs a service to put
 Run this script to setup and insert mariadb into the cluster
 
     curl -O https://raw.githubusercontent.com/splatage/debian_setup/refs/heads/main/mariadb_cluster_controller.sh
-    bash mariadb_setup_controller.sh
+    bash mariadb_cluster_controller.sh
 
 ---
 
