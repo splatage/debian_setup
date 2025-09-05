@@ -567,6 +567,113 @@ EOF
 }
 
 #######################################
+# Health check across PRIMARY + all REPLICAS.
+# Read-only: reports service, replication, load, disk, ZFS.
+#######################################
+health_check() {
+  info "Running health check across MariaDB cluster..."
+  local all_ips=("${PRIMARY_IP}" "${REPLICA_IP_LIST[@]}")
+  local failures=0
+
+  for node_ip in "${all_ips[@]}"; do
+    info "Probing ${node_ip}..."
+    local report
+    report=$(ssh -o ConnectTimeout=5 "${SSH_USER}@${node_ip}" \
+      "MARIADB_BASE_DIR='${MARIADB_BASE_DIR}' ZFS_POOL_NAME='${ZFS_POOL_NAME}' bash -s" -- <<'REMOTE'
+set -euo pipefail
+
+section() { printf "----- %s -----\n" "$*"; }
+p() { printf "%s\n" "$*"; }
+
+STATUS="OK"
+
+HOST="$(hostname -f 2>/dev/null || hostname)"
+UPTIME="$(uptime -p 2>/dev/null || true)"
+LOADAVG="$(awk '{printf "%s %s %s",$1,$2,$3}' /proc/loadavg 2>/dev/null || true)"
+CPU="$(nproc 2>/dev/null || echo "?")"
+MEM="$(free -m 2>/dev/null | awk '/Mem:/ {printf "%s/%sMB used",$3,$2}' || echo "-")"
+DISK="$(df -h "${MARIADB_BASE_DIR}" 2>/dev/null | awk 'NR==2{print $5" used of "$2" ("$4" free) on "$6}' || echo "-")"
+
+ZPOOL_STATE="$(command -v zpool >/dev/null 2>&1 && zpool list -H -o health "${ZFS_POOL_NAME}" 2>/dev/null || echo "-")"
+ZPOOL_STATUS_X="$(command -v zpool >/dev/null 2>&1 && zpool status -x "${ZFS_POOL_NAME}" 2>/dev/null || echo "-")"
+COMPRESS="$(command -v zfs >/dev/null 2>&1 && zfs get -H -o value compression "${ZFS_POOL_NAME}" 2>/dev/null || echo "-")"
+COMPRESSR="$(command -v zfs >/dev/null 2>&1 && zfs get -H -o value compressratio "${ZFS_POOL_NAME}" 2>/dev/null || echo "-")"
+
+MYSVC="$(systemctl is-active mariadb 2>/dev/null || echo inactive)"
+[ "$MYSVC" = "active" ] || STATUS="FAIL"
+
+PORT_OPEN="$(
+  if command -v ss >/dev/null 2>&1; then ss -lnt '( sport = :3306 )' | tail -n +2; 
+  elif command -v netstat >/dev/null 2>&1; then netstat -lnt 2>/dev/null | awk '$4 ~ /:3306$/'; 
+  fi
+)"
+MYSQLVER="$(mariadb --version 2>/dev/null | awk '{print $3,$4}' || echo "-")"
+
+ROLE="unknown"
+READ_ONLY="$(mariadb -Nse "SELECT @@read_only" 2>/dev/null || echo "?")"
+[ "$READ_ONLY" = "0" ] && ROLE="Primary"
+
+SLAVE_RAW="$(mariadb -e 'SHOW SLAVE STATUS\G' 2>/dev/null || true)"
+if [ -n "$SLAVE_RAW" ]; then
+  ROLE="Replica"
+  SIO="$(printf "%s\n" "$SLAVE_RAW" | awk -F': ' '/Slave_IO_Running:/ {print $2}')"
+  SSQL="$(printf "%s\n" "$SLAVE_RAW" | awk -F': ' '/Slave_SQL_Running:/ {print $2}')"
+  SBEHIND="$(printf "%s\n" "$SLAVE_RAW" | awk -F': ' '/Seconds_Behind_Master:/ {print $2}')"
+  [ -z "$SBEHIND" ] || [ "$SBEHIND" = "NULL" ] && SBEHIND=0
+  SGTID="$(printf "%s\n" "$SLAVE_RAW" | awk -F': ' '/Using_Gtid:/ {print $2}')"
+  GIOP="$(printf "%s\n" "$SLAVE_RAW" | awk -F': ' '/Gtid_IO_Pos:/ {print $2}')"
+  LIOE="$(printf "%s\n" "$SLAVE_RAW" | awk -F': ' '/Last_IO_Error:/ {print $2}')"
+  LSQL="$(printf "%s\n" "$SLAVE_RAW" | awk -F': ' '/Last_SQL_Error:/ {print $2}')"
+  if [ "$SIO$SSQL" != "YesYes" ]; then STATUS="DEGRADED"; fi
+  if [ -n "$LIOE" ] && [ "$LIOE" != "" ]; then STATUS="DEGRADED"; fi
+  if [ -n "$LSQL" ] && [ "$LSQL" != "" ]; then STATUS="DEGRADED"; fi
+fi
+
+if [ "$ROLE" = "Primary" ]; then
+  MS="$(mariadb -e 'SHOW MASTER STATUS\G' 2>/dev/null || true)"
+  MBIN="$(printf "%s\n" "$MS" | awk -F': ' '/File:/ {print $2}')"
+  MPOS="$(printf "%s\n" "$MS" | awk -F': ' '/Position:/ {print $2}')"
+  GCUR="$(mariadb -Nse 'SELECT @@gtid_current_pos' 2>/dev/null || echo "-")"
+fi
+
+section "Node: $HOST"
+p "IP: ${SSH_CONNECTION%% *}"
+p "Uptime: $UPTIME"
+p "Load(1/5/15): $LOADAVG  | CPU: ${CPU}c  | Mem: $MEM"
+p "MariaDB: service=$MYSVC  version=$MYSQLVER  port_open=$([ -n "$PORT_OPEN" ] && echo yes || echo no)"
+p "Role: $ROLE  read_only=$READ_ONLY"
+if [ "$ROLE" = "Replica" ]; then
+  p "Replica: IO=$SIO  SQL=$SSQL  Behind=$SBEHIND  Using_Gtid=$SGTID  Gtid_IO_Pos=$GIOP"
+  p "Errors: Last_IO='${LIOE:-}'  Last_SQL='${LSQL:-}'"
+fi
+if [ "$ROLE" = "Primary" ]; then
+  p "Primary: Binlog=${MBIN:-}  Pos=${MPOS:-}  gtid_current_pos=${GCUR:-}"
+fi
+p "ZFS: pool_health=${ZPOOL_STATE}  compression=${COMPRESS}  compressratio=${COMPRESSR}"
+if [ "$ZPOOL_STATUS_X" != "all pools are healthy" ] && [ "$ZPOOL_STATUS_X" != "-" ]; then
+  STATUS="DEGRADED"
+  p "ZFS status: ${ZPOOL_STATUS_X}"
+fi
+p "Data FS: ${DISK}"
+printf "HEALTH_RESULT:%s\n" "$STATUS"
+REMOTE
+    )
+    echo "${report}"
+    local result
+    result=$(echo "${report}" | awk -F':' '/HEALTH_RESULT:/ {print $2}' | tail -1 | tr -d '\r')
+    [[ "${result}" == "OK" ]] || failures=$((failures+1))
+    echo
+  done
+
+  if [[ $failures -gt 0 ]]; then
+    warn "Health check completed with ${failures} issue(s)."
+    return 1
+  else
+    success "All nodes healthy."
+  fi
+}
+
+#######################################
 # Main execution logic for the script.
 #######################################
 main() {
@@ -580,6 +687,8 @@ main() {
     echo "                       and all Replicas."
     echo "  switchover        -- Interactively promotes a chosen Replica to be the"
     echo "                       new Primary."
+    echo "  health            -- Check primary/replica health, replication, and server load."
+
     exit 1
   fi
   case "${1}" in
@@ -600,6 +709,9 @@ main() {
           ;;
         switchover)
           switchover_roles
+          ;;
+        health)
+          health_check
           ;;
         *)
           echo "Error: Unknown action '${2:-}'" >&2
