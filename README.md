@@ -204,6 +204,15 @@ journalctl -u fan-control -e
 
 ---
 
+## 6) Prep Node Env
+**Purpose:** Installs the node.js environment in preparation for the projectfile to populate
+**Run (as root) on the target machone:**
+```bash
+https://raw.githubusercontent.com/splatage/debian_setup/refs/heads/main/prep_node_env.sh
+bash prep_node_env.sh
+```
+---
+
 ## Operations & Maintenance
 - **Backups:** Use your existing backup workflows; the cluster controller streams backups during provisioning. For periodic backups, use `mariadb-backup`/`xtrabackup` or logical dumps as appropriate.
 - **Monitoring:** Track `SHOW SLAVE STATUS\G` on replicas; export metrics to your stack.
