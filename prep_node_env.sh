@@ -1,34 +1,14 @@
 #!/usr/bin/env bash
-# prepare_node_env.sh
+# prep_node_env.sh
 # Purpose: PREPARE environment only (NVM, Node.js, PM2) for a specific user.
 # No app cloning, no .env, no services, no PM2 startup units.
-#
-# Usage examples:
-#   sudo bash prepare_node_env.sh --user tradebid
-#   sudo bash prepare_node_env.sh --user tradebid --node node
-#   sudo bash prepare_node_env.sh --user tradebid --node 22.16.0
-#   sudo bash prepare_node_env.sh --help
-#
-# Scope:
-# - Install curl/ca-certificates if missing (required for NVM installer)
-# - Install NVM for the target user (if not already installed)
-# - Install requested Node.js via NVM and set as default
-# - Install PM2 (globally for that user)
-# - Append a minimal NVM loader snippet to the user's .bashrc (once)
-#
-# Explicitly NOT doing:
-# - Git clone / app files / directories
-# - .env / credentials
-# - Services / systemd / pm2 startup units
-# - System limits, sysctl, SSH, or any unrelated system changes
 
 set -euo pipefail
 
 # ---------------------- Defaults (overridable by flags) -----------------------
 TARGET_USER=""
-NODE_VERSION="lts/*"              # default: latest LTS release
-NVM_VERSION="v0.39.7"
-NVM_INSTALL_URL="https://raw.githubusercontent.com/nvm-sh/nvm/${NVM_VERSION}/install.sh"
+NODE_VERSION="lts/*"              # default: latest LTS release; use --node node for latest current
+NVM_INSTALL_URL="https://raw.githubusercontent.com/nvm-sh/nvm/install.sh"  # always latest installer
 QUIET=0
 
 # ---------------------- Helpers ----------------------------------------------
@@ -36,15 +16,22 @@ log()  { printf "%s\n" "INFO: $*"; }
 warn() { printf "%s\n" "WARN: $*" >&2; }
 err()  { printf "%s\n" "ERROR: $*" >&2; exit 1; }
 
-need_root() {
-  if [[ $EUID -ne 0 ]]; then err "Please run as root (sudo)."; fi
-}
-
-have_cmd() { command -v "$1" >/dev/null 2>&1; }
+need_root() { [[ $EUID -eq 0 ]] || err "Please run as root (sudo)."; }
+have_cmd()  { command -v "$1" >/dev/null 2>&1; }
 
 as_user() {
   local user="$1"; shift
   su - "$user" -c "bash -lc \"$*\""
+}
+
+# Always source NVM before using it (fixes 'nvm: command not found')
+nvm_run() {
+  local user="$1"; shift
+  local nvm_dir="$2"; shift
+  as_user "$user" "export NVM_DIR='${nvm_dir}'; \
+    [ -s \"\$NVM_DIR/nvm.sh\" ] && . \"\$NVM_DIR/nvm.sh\"; \
+    [ -s \"\$NVM_DIR/bash_completion\" ] && . \"\$NVM_DIR/bash_completion\"; \
+    $*"
 }
 
 append_once() {
@@ -69,29 +56,26 @@ append_once() {
 print_help() {
 cat <<'EOF'
 Usage:
-  sudo bash prepare_node_env.sh --user <username> [--node <version>] [--nvm-version <tag>] [--quiet] [--help]
+  sudo bash prep_node_env.sh --user <username> [--node <version>] [--quiet] [--help]
 
 Flags:
   --user <name>          Target Linux user that will own NVM/Node/PM2 (required).
   --node <version>       Node.js version (default: lts/*). Examples: lts/*, node, 22.16.0
-  --nvm-version <tag>    NVM version tag (default: v0.39.7)
   --quiet                Reduce output
   --help                 Show this help message
 
-What this script DOES:
-  - Installs NVM for the given user.
-  - Installs the specified Node.js version via NVM and sets it as default.
+Does:
+  - Installs latest NVM for the user.
+  - Installs Node.js via NVM and sets it as default.
   - Installs PM2 for that user (npm -g).
   - Adds a minimal shell snippet to load NVM on login.
 
-What this script DOES NOT do:
-  - Git clone or create app directories.
-  - Configure .env or credentials.
+Does NOT:
+  - Git clone, create app dirs, write .env/credentials.
   - Create services or PM2 startup units.
-  - Make system-wide tuning changes.
+  - Change system-wide tuning.
 
-Idempotency:
-  - Safe to re-run; existing steps are detected and skipped.
+Idempotent: safe to re-run.
 EOF
 }
 
@@ -100,11 +84,10 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --user)         TARGET_USER="${2:-}"; shift 2 ;;
     --node)         NODE_VERSION="${2:-}"; shift 2 ;;
-    --nvm-version)  NVM_VERSION="${2:-}"; NVM_INSTALL_URL="https://raw.githubusercontent.com/nvm-sh/nvm/${NVM_VERSION}/install.sh"; shift 2 ;;
     --quiet)        QUIET=1; shift ;;
     --help|-h)      print_help; exit 0 ;;
     *)              err "Unknown argument: $1 (use --help)";;
-  esac
+  endcase
 done
 
 # ---------------------- Validations ------------------------------------------
@@ -129,9 +112,9 @@ if ! have_cmd curl; then
   fi
 fi
 
-# ---------------------- Stage 2: NVM install ---------------------------------
+# ---------------------- Stage 2: NVM install (latest) ------------------------
 if [[ ! -s "${NVM_DIR_USER}/nvm.sh" ]]; then
-  [[ $QUIET -eq 1 ]] || log "Installing NVM ${NVM_VERSION} for ${TARGET_USER} ..."
+  [[ $QUIET -eq 1 ]] || log "Installing NVM (latest) for ${TARGET_USER} ..."
   as_user "$TARGET_USER" "curl -fsSL '${NVM_INSTALL_URL}' | bash"
 else
   [[ $QUIET -eq 1 ]] || log "NVM already present at ${NVM_DIR_USER}"
@@ -155,13 +138,16 @@ chown "$TARGET_USER":"$TARGET_USER" "$BASHRC_USER" || true
 
 # ---------------------- Stage 4: Node.js via NVM -----------------------------
 [[ $QUIET -eq 1 ]] || log "Installing Node.js '${NODE_VERSION}' for ${TARGET_USER} ..."
-as_user "$TARGET_USER" "export NVM_DIR='$NVM_DIR_USER'; [ -s '\$NVM_DIR/nvm.sh' ] && . '\$NVM_DIR/nvm.sh'; nvm install '${NODE_VERSION}'"
-as_user "$TARGET_USER" "export NVM_DIR='$NVM_DIR_USER'; [ -s '\$NVM_DIR/nvm.sh' ] && . '\$NVM_DIR/nvm.sh'; nvm alias default '${NODE_VERSION}'"
-as_user "$TARGET_USER" "export NVM_DIR='$NVM_DIR_USER'; [ -s '\$NVM_DIR/nvm.sh' ] && . '\$NVM_DIR/nvm.sh'; nvm use default"
+nvm_run "$TARGET_USER" "$NVM_DIR_USER" "nvm install '${NODE_VERSION}'"
+nvm_run "$TARGET_USER" "$NVM_DIR_USER" "nvm alias default '${NODE_VERSION}'"
+nvm_run "$TARGET_USER" "$NVM_DIR_USER" "nvm use default"
 
 # ---------------------- Stage 5: PM2 (no startup config) ---------------------
 [[ $QUIET -eq 1 ]] || log "Installing PM2 (user-global) for ${TARGET_USER} ..."
-as_user "$TARGET_USER" "bash -lc 'npm install -g pm2'"
+nvm_run "$TARGET_USER" "$NVM_DIR_USER" "npm install -g pm2"
+
+# ---------------------- Verification (optional but helpful) -------------------
+nvm_run "$TARGET_USER" "$NVM_DIR_USER" "node -v && npm -v && pm2 -v" || true
 
 # ---------------------- Completion -------------------------------------------
 log "===== PREPARED: environment ready for user '$TARGET_USER' ====="
