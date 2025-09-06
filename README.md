@@ -71,7 +71,8 @@ Either via ssh or the shell:
 
 ```
 apt install curl
-curl -O 
+curl -O https://raw.githubusercontent.com/splatage/debian_setup/refs/heads/main/debian_zfs_install.sh
+bash debian_zfs_install.sh 
 ```
 
 **What it does (observed from script):**
@@ -101,8 +102,8 @@ lsblk -f
 
 **Run from a controller host that has key-based root SSH to all DB nodes:**
 ```bash
-cd /path/to/debian_setup-main
-bash mariadb_cluster_controller.sh --help   # if implemented; otherwise see usage below
+curl -O https://raw.githubusercontent.com/splatage/debian_setup/refs/heads/main/mariadb_cluster_controller.sh
+bash mariadb_cluster_controller.sh
 ```
 
 **Capabilities (from script review):**
@@ -131,7 +132,9 @@ bash mariadb_cluster_controller.sh --help   # if implemented; otherwise see usag
 
 ---
 
-## 3) MariaDB Server Config (`mariadb.conf`)
+## 3) MariaDB Server Config Template (`mariadb.conf`) 
+> Already installed by the mariadb_cluster_controller.sh
+
 **Purpose:** Baseline MariaDB tuning including GTID replication and InnoDB parameters. Adjust sizes to your RAM and workload.
 
 **Install on each MariaDB host:**
@@ -159,17 +162,8 @@ systemctl restart mariadb
 **Usage (from header):**
 ```bash
 # Interactive install
-sudo bash -c "$(curl -sSL <URL_TO_SCRIPT>)"
-
-# Uninstall
-sudo bash -c "$(curl -sSL <URL_TO_SCRIPT>)" -s -- --uninstall
-```
-
-**Local execution from this repo:**
-```bash
-cd /path/to/debian_setup-main
-sudo bash perf-tune-hardening.sh
-```
+curl -O https://raw.githubusercontent.com/splatage/debian_setup/refs/heads/main/perf-tune-hardening.sh
+bash perf-tune-hardening.sh
 
 **What it configures (per script body):**
 - Writes defaults to `/etc/default/perf-tuning`
@@ -189,7 +183,7 @@ sudo bash perf-tune-hardening.sh --uninstall
 
 **Run (as root) on the target machine:**
 ```bash
-cd /path/to/debian_setup-main
+curl -O https://raw.githubusercontent.com/splatage/debian_setup/refs/heads/main/fan_temp_service.sh
 bash fan_temp_service.sh
 ```
 
