@@ -243,15 +243,18 @@ DOWN_GAIN=1
 MIN_PCT=5
 MAX_PCT=50
 
-# Platform select (no auto-detect; set explicitly)
-VENDOR=ibm            # ibm | dell
+# Platform select ibm | dell (no auto-detect; set explicitly)
+VENDOR=ibm
 
 # IBM-only settings
-IBM_BANKS="0x01"      # set only valid banks for your chassis (e.g. x3500: 0x01)
-IBM_CODEMAP=linear     # table | linear  (table is calmer on IBM)
+# set only valid banks for your chassis (e.g. x3500: 0x01)
+IBM_BANKS="0x01"
+# table | linear  (table is calmer on IBM)
+IBM_CODEMAP=linear
 
 # Safety / testing
-DO_WRITE=1            # 1=apply via ipmitool, 0=dry-run logs only
+DO_WRITE=1
+# 1=apply via ipmitool, 0=dry-run logs only
 DFEOF
   chmod 0644 "${DEFAULTS_PATH}"
 }
