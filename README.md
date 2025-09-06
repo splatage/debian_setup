@@ -208,7 +208,7 @@ journalctl -u fan-control -e
 **Purpose:** Installs the node.js environment in preparation for the projectfile to populate
 **Run (as root) on the target machone:**
 ```bash
-https://raw.githubusercontent.com/splatage/debian_setup/refs/heads/main/prep_node_env.sh
+curl -O https://raw.githubusercontent.com/splatage/debian_setup/refs/heads/main/prep_node_env.sh
 bash prep_node_env.sh
 ```
 ---
