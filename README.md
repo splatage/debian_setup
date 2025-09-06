@@ -214,6 +214,17 @@ bash prep_node_env.sh
 ```
 ---
 
+## 7) Install PM2 Backend API Service
+**Purpose** Sets up the PM2 cluster manager as a service
+**Run (as root) on the target machine:**
+```bash
+curl -O https://raw.githubusercontent.com/splatage/debian_setup/refs/heads/main/pm2_service_install.sh
+bash pm2_service_install.sh
+```
+
+---
+
+
 ## Operations & Maintenance
 - **Backups:** Use your existing backup workflows; the cluster controller streams backups during provisioning. For periodic backups, use `mariadb-backup`/`xtrabackup` or logical dumps as appropriate.
 - **Monitoring:** Track `SHOW SLAVE STATUS\G` on replicas; export metrics to your stack.
