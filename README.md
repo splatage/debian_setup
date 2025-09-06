@@ -10,7 +10,7 @@
 - [3) MariaDB Server Config (`mariadbconf`)](#3-mariadb-server-config-mariadbconf)
 - [4) Performance Tuning & Hardening (`perf-tune-hardening.sh`)](#4-performance-tuning--hardening-perf-tune-hardeningsh)
 - [5) Fan Control Service (`fan_temp_service.sh`)](#5-fan-control-service-fan_temp_servicesh)
-- [6) Prep node.js Environment (`prep_node_env.sh`)](##-Prep-Node-Env)
+- [6) Prep node.js Environment (`prep_node_env.sh`)](#6-pre-node-env-prep_node_envsh)
 - [Operations & Maintenance](#operations--maintenance)
 - [Troubleshooting](#troubleshooting)
 - [Scope & Progress](#scope--progress)
@@ -205,7 +205,7 @@ journalctl -u fan-control -e
 
 ---
 
-## 6) Prep Node Env
+## 6) Prep Node Env (`prep_node_env.sh`)
 **Purpose:** Installs the node.js environment in preparation for the projectfile to populate
 **Run (as root) on the target machone:**
 ```bash
