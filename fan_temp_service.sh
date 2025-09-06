@@ -1,6 +1,8 @@
 #!/bin/bash
 # setup-fan-service.sh
-# Installs /usr/local/sbin/fan_control.sh and a simple systemd unit with optional env overrides.
+# Installs /usr/local/sbin/fan_control.sh and a systemd service.
+# Reads CPU temps from sysfs coretemp only; writes fans via IPMI.
+# Scope: simple baseline control, no smoothing, no SDR, no sensors CLI.
 
 set -euo pipefail
 IFS=$'\n\t'
@@ -17,8 +19,7 @@ need_root() {
 }
 
 install_deps() {
-  # Best-effort: install ipmitool and dmidecode if using a common package manager
-  local pkgs=(ipmitool dmidecode)
+  local pkgs=(ipmitool)  # sysfs read needs no packages; we only need ipmitool to write fans
   if command -v apt-get >/dev/null 2>&1; then
     apt-get update -y
     apt-get install -y "${pkgs[@]}"
@@ -29,7 +30,7 @@ install_deps() {
   elif command -v zypper >/dev/null 2>&1; then
     zypper install -y "${pkgs[@]}"
   else
-    echo "NOTE: Could not detect a supported package manager. Ensure these are installed: ${pkgs[*]}" >&2
+    echo "NOTE: Could not detect a supported package manager. Ensure installed: ${pkgs[*]}" >&2
   fi
 }
 
@@ -37,19 +38,17 @@ write_script() {
   install -m 0755 /dev/stdin "${SCRIPT_PATH}" <<'FANEOF'
 #!/bin/bash
 # /usr/local/sbin/fan_control.sh
-# Baseline-referenced fan control for IBM (step or linear hex) and Dell/Unisys (percent).
-# - ONE SDR snapshot per loop, kept IN MEMORY.
-# - HOTTEST temperature drives control (PCH excluded as per last request).
-# - Post-read keepalive (reassert current speed immediately after SDR read).
-# - IBM bank handling:
-#     * If IBM_BANKS is set (e.g. "0x01" or "0x01 0x02"), auto-detection is BYPASSED and those banks are always used.
-#     * Otherwise, auto-detect CPU1/CPU2 presence each loop and write only to present banks.
+# Minimal, sysfs-only CPU-temp → fan control for IBM (IMM) or Dell/Unisys.
+# - Temp source: /sys/class/hwmon/* coretemp (Package id N). No 'sensors', no SDR.
+# - Control: baseline + gains + deadband; clamp to [MIN_PCT, MAX_PCT].
+# - IBM: write configured banks only; no detection; trailing byte fixed to 0x01.
+# - Dell: manual mode then set global %.
 
-set -u -o pipefail
+set -euo pipefail
 IFS=$'\n\t'
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
-# ------------ single-instance lock ------------
+# ---------- single-instance lock ----------
 LOCKFILE="/var/run/fan_control.lock"
 exec 9>"$LOCKFILE"
 if ! flock -n 9; then
@@ -57,110 +56,119 @@ if ! flock -n 9; then
   exit 0
 fi
 
-# ------------ knobs ------------
-INTERVAL=${INTERVAL:-30}        # seconds
-BASELINE_C=${BASELINE_C:-45}    # target "quiet" °C
-UP_GAIN=${UP_GAIN:-2}           # % per +1°C above baseline
-DOWN_GAIN=${DOWN_GAIN:-1}       # % per -1°C below baseline
-MIN_PCT=${MIN_PCT:-5}           # min %
-MAX_PCT=${MAX_PCT:-60}          # max %
-SLEW_PCT=${SLEW_PCT:-15}        # per-cycle max % change (0=off)
-DEADBAND_C=${DEADBAND_C:-0}     # °C around baseline to keep MIN_PCT (0=off)
+# ---------- config (env-overridable) ----------
+INTERVAL=${INTERVAL:-15}          # seconds between loops
+BASELINE_C=${BASELINE_C:-45}      # target quiet temp (°C)
+UP_GAIN=${UP_GAIN:-1.5}             # % per +1°C above baseline
+DOWN_GAIN=${DOWN_GAIN:-1}         # % per -1°C below baseline
+DEADBAND_C=${DEADBAND_C:-1}       # °C around baseline to hold MIN_PCT
+MIN_PCT=${MIN_PCT:-5}            # floor %
+MAX_PCT=${MAX_PCT:-50}            # ceiling % (IBM: stay <= ~0x50 to avoid mixing)
 
-IBM_CODEMAP="${IBM_CODEMAP:-linear}"  # table|linear
-IBM_BANK1="${IBM_BANK1:-0x01}"
-IBM_BANK2="${IBM_BANK2:-0x02}"
-IBM_BANKS="${IBM_BANKS:-}"            # if non-empty, space-separated list of banks (e.g. "0x01 0x02") -> bypass detect
+VENDOR=${VENDOR:-ibm}             # 'ibm' or 'dell'
+IBM_BANKS=${IBM_BANKS:-0x01}      # space-separated list; no autodetect; e.g. "0x01" or "0x01 0x02"
+IBM_CODEMAP=${IBM_CODEMAP:-linear} # 'table' or 'linear' (table is calmer on IBM)
 
-# ------------ vendor detect ------------
-lower(){ tr '[:upper:]' '[:lower:]'; }
-detect_vendor() {
-  local man prod base
-  man="$(dmidecode -s system-manufacturer 2>/dev/null | lower || true)"
-  prod="$(dmidecode -s system-product-name 2>/dev/null | lower || true)"
-  base="$(dmidecode -s baseboard-manufacturer 2>/dev/null | lower || true)"
-  local s="${man} ${base} ::: ${prod}"
-  if echo "$s" | grep -Eq 'dell|emc|unisys'; then echo dell
-  elif echo "$s" | grep -Eq 'ibm|lenovo'; then echo ibm
-  else echo ibm; fi
-}
-VENDOR="$(detect_vendor)"
-echo "[$(date +'%F %T')] start vendor=$VENDOR baseline=${BASELINE_C}C IBM_CODEMAP=${IBM_CODEMAP} IBM_BANKS='${IBM_BANKS}'"
+DO_WRITE=${DO_WRITE:-1}           # 1=apply via ipmitool, 0=dry-run log only
 
-# ------------ SDR snapshot (in memory) ------------
-SDR=""
-fetch_ipmi(){
-  SDR="$(ipmitool sdr type temperature 2>/dev/null)" && [[ -n "$SDR" ]]
+# ---------- helpers ----------
+now() { date +'%Y-%m-%d %H:%M:%S'; }
+clamp_pct() { local p=$1; (( p<0 )) && p=0; (( p>100 )) && p=100; echo "$p"; }
+log() { echo "[$(now)] $*"; }
+run() {
+  # echo the ipmitool command; execute only if DO_WRITE=1
+  echo "+ $*"
+  if [[ "$DO_WRITE" = "1" ]]; then
+    "$@"
+  fi
 }
 
-# ------------ parsers using in-memory SDR ------------
-# Hottest temperature anywhere in SDR (exclude PCH)
-hottest_temp_any(){
-  awk -F'|' '!/PCH/ {print $NF}' <<< "$SDR" \
-  | sed -E 's/[^0-9.]//g;/^$/d' \
-  | sort -n | tail -n 1 \
-  | awk '{printf "%d\n", ($1+0)}'
+# ---------- sysfs temperature (coretemp only) ----------
+# Returns hottest package temperature across all sockets (int °C), or empty on failure.
+read_hottest_package_temp() {
+  local best=-1
+  shopt -s nullglob
+  for H in /sys/class/hwmon/*; do
+    [[ -r "$H/name" ]] || continue
+    local name; name=$(<"$H/name")
+    [[ "$name" =~ [Cc]oretemp ]] || continue
+
+    local found_pkg=0
+    for L in "$H"/temp*_label; do
+      [[ -r "$L" ]] || continue
+      local lab; lab=$(<"$L")
+      if [[ "$lab" =~ [Pp]ackage[[:space:]]*id[[:space:]]*[0-9]+ ]]; then
+        local base=${L%_label}
+        local inp="${base}_input"
+        [[ -r "$inp" ]] || continue
+        local milli; milli=$(tr -dc '0-9' < "$inp")
+        [[ -n "$milli" ]] || continue
+        local deg=$(( milli / 1000 ))
+        (( deg > 0 && deg <= 120 )) || continue
+        (( deg > best )) && best=$deg
+        found_pkg=1
+      fi
+    done
+
+    # fallback: if no Package labels, accept any coretemp inputs (cores)
+    if (( found_pkg == 0 )); then
+      for inp in "$H"/temp*_input; do
+        [[ -r "$inp" ]] || continue
+        local milli; milli=$(tr -dc '0-9' < "$inp")
+        [[ -n "$milli" ]] || continue
+        local deg=$(( milli / 1000 ))
+        (( deg > 0 && deg <= 120 )) || continue
+        (( deg > best )) && best=$deg
+      done
+    fi
+  done
+  if (( best >= 0 )); then
+    echo "$best"
+    return 0
+  else
+    return 1
+  fi
 }
 
-# IBM bank presence: CPU1/CPU2 have a numeric temperature in the LAST field
-ibm_have_cpu1(){
-  awk -F'|' '
-    BEGIN{IGNORECASE=1}
-    ($1 ~ /(CPU[[:space:]]*1|CPU1)/) && ($1 ~ /Temp/) {
-      f=$NF; gsub(/[^0-9.]/,"",f);
-      if (f != "") { print 1; exit }
-    }' <<< "$SDR"
-}
-ibm_have_cpu2(){
-  awk -F'|' '
-    BEGIN{IGNORECASE=1}
-    ($1 ~ /(CPU[[:space:]]*2|CPU2)/) && ($1 ~ /Temp/) {
-      f=$NF; gsub(/[^0-9.]/,"",f);
-      if (f != "") { print 1; exit }
-    }' <<< "$SDR"
-}
+# ---------- control law ----------
+compute_target_percent() {
+  local t=$1
+  local err=$(( t - BASELINE_C ))
 
-# ------------ % helpers ------------
-compute_from_baseline(){
-  local t="$1" err want
-  err=$(( t - BASELINE_C ))
-
+  # deadband: hold MIN_PCT near baseline
   if (( DEADBAND_C > 0 )); then
     local abserr=$(( err<0 ? -err : err ))
-    if (( abserr <= DEADBAND_C )); then echo "$MIN_PCT"; return; fi
+    if (( abserr <= DEADBAND_C )); then
+      echo "$MIN_PCT"; return
+    fi
   fi
 
+  local pct
   if (( err >= 0 )); then
-    want=$(( MIN_PCT + UP_GAIN * err ))
+    pct=$(( MIN_PCT + UP_GAIN * err ))
   else
     err=$(( -err ))
-    want=$(( MIN_PCT - DOWN_GAIN * err ))
+    pct=$(( MIN_PCT - DOWN_GAIN * err ))
   fi
-  (( want < MIN_PCT )) && want="$MIN_PCT"
-  (( want > MAX_PCT )) && want="$MAX_PCT"
-  echo "$want"
-}
-apply_slew(){
-  local last="$1" want="$2" delta
-  (( SLEW_PCT == 0 )) && { echo "$want"; return; }
-  delta=$(( want - last ))
-  if   (( delta >  SLEW_PCT )); then echo $(( last + SLEW_PCT ))
-  elif (( delta < -SLEW_PCT )); then echo $(( last - SLEW_PCT ))
-  else echo "$want"; fi
+
+  (( pct < MIN_PCT )) && pct=$MIN_PCT
+  (( pct > MAX_PCT )) && pct=$MAX_PCT
+  echo "$pct"
 }
 
-# ------------ IBM % → hex ------------
-ibm_hex_for_pct(){
-  local p=$1
-  (( p<0 )) && p=0; (( p>100 )) && p=100
-  if [[ "$IBM_CODEMAP" = "linear" ]]; then
-    local min_dec=$((16#12)) max_dec=$((16#FF)) span
-    span=$(( max_dec - min_dec ))
+# ---------- IBM mapping & writers ----------
+ibm_hex_for_pct() {
+  local p; p=$(clamp_pct "$1")
+  if [[ "$IBM_CODEMAP" == "linear" ]]; then
+    # 0..100% → 0x12..0xFF
+    local min_dec=$((16#12)) max_dec=$((16#FF))
+    local span=$(( max_dec - min_dec ))
     local code=$(( min_dec + (p * span + 50) / 100 ))
     (( code < min_dec )) && code=$min_dec
     (( code > max_dec )) && code=$max_dec
-    printf "0x%02X\n" "$code"
+    printf "0x%02X" "$code"
   else
+    # classic step table (quieter on IBM)
     if   (( p <= 0 ));  then echo 0x12
     elif (( p <= 25 )); then echo 0x30
     elif (( p <= 30 )); then echo 0x35
@@ -177,74 +185,45 @@ ibm_hex_for_pct(){
   fi
 }
 
-# ------------ writers ------------
-set_ibm_bank(){ local bank="$1" pct="$2" hx; hx="$(ibm_hex_for_pct "$pct")"; ipmitool raw 0x3a 0x07 "$bank" "$hx" 0x01; }
-pct_to_hex(){ local p="$1"; (( p<0 )) && p=0; (( p>100 )) && p=100; printf "0x%02x" "$p"; }
-set_dell_global(){ local pct="$1" hx; hx="$(pct_to_hex "$pct")"; ipmitool raw 0x30 0x30 0x01 0x00; ipmitool raw 0x30 0x30 0x02 0xff "$hx"; }
+set_ibm_bank_pct() {
+  local bank="$1" pct="$2"
+  local hx; hx="$(ibm_hex_for_pct "$pct")"
+  run ipmitool raw 0x3a 0x07 "$bank" "$hx" 0x01
+}
 
-# ------------ state ------------
-CUR_PCT="$MIN_PCT"
+# ---------- Dell writer ----------
+pct_to_hex() { local p; p=$(clamp_pct "$1"); printf "0x%02x" "$p"; }
+set_dell_global_pct() {
+  local pct="$1" hx; hx="$(pct_to_hex "$pct")"
+  run ipmitool raw 0x30 0x30 0x01 0x00          # manual mode
+  run ipmitool raw 0x30 0x30 0x02 0xff "$hx"    # set %
+}
 
-# ------------ main loop ------------
+# ---------- main loop ----------
+log "start vendor=${VENDOR} baseline=${BASELINE_C}C deadband=${DEADBAND_C}C range=${MIN_PCT}..${MAX_PCT}% map=${IBM_CODEMAP} write=${DO_WRITE}"
+
 while true; do
-  # 1) Read SDR
-  if ! fetch_ipmi; then
-    echo "[$(date +'%F %T')] IPMI read failed; retrying..."
-    sleep "$INTERVAL"; continue
-  fi
-
-  # 2) Decide the IBM banks to use this loop
-  BANKS=""
-  if [[ "$VENDOR" == "ibm" ]]; then
-    if [[ -n "$IBM_BANKS" ]]; then
-      # Manual override: bypass detection entirely
-      BANKS="$IBM_BANKS"
-    else
-      # Auto-detect from snapshot
-      HAVE1="$(ibm_have_cpu1 || true)"
-      HAVE2="$(ibm_have_cpu2 || true)"
-      [[ -n "$HAVE1" ]] && BANKS="$BANKS $IBM_BANK1"
-      [[ -n "$HAVE2" ]] && BANKS="$BANKS $IBM_BANK2"
-      BANKS="${BANKS# }"
-    fi
-  fi
-
-  # 3) Post-read keepalive: re-assert current speed
-  if [[ "$VENDOR" == "ibm" ]]; then
-    HX_KEEP="$(ibm_hex_for_pct "$CUR_PCT")"
-    if [[ -n "$BANKS" ]]; then
-      for b in $BANKS; do
-        ipmitool raw 0x3a 0x07 "$b" "$HX_KEEP" 0x01 >/dev/null 2>&1 || true
-      done
-    fi
-  else
-    set_dell_global "$CUR_PCT" >/dev/null 2>&1 || true
-  fi
-
-  # 4) Parse hottest temp, compute and set new target
-  HOT="$(hottest_temp_any)"
+  # 1) read hottest package temp
+  HOT="$(read_hottest_package_temp || true)"
   if [[ -z "${HOT:-}" ]]; then
-    echo "[$(date +'%F %T')] No temperature parsed from SDR; retrying..."
-    sleep "$INTERVAL"; continue
+    log "no CPU temp via sysfs coretemp; try 'modprobe coretemp'"
+    sleep "$INTERVAL"
+    continue
   fi
 
-  WANT="$(compute_from_baseline "$HOT")"
-  CUR_PCT="$(apply_slew "$CUR_PCT" "$WANT")"
+  # 2) compute percent
+  WANT="$(compute_target_percent "$HOT")"
 
+  # 3) write
   if [[ "$VENDOR" == "ibm" ]]; then
-    if [[ -z "$BANKS" ]]; then
-      echo "[$(date +'%F %T')] IBM: no banks resolved (override empty + auto-detect found none). Skipping write."
-    else
-      for b in $BANKS; do
-        set_ibm_bank "$b" "$CUR_PCT"
-      done
-      echo "[$(date +'%F %T')] IBM: HOT=${HOT}°C -> ${CUR_PCT}% (map=${IBM_CODEMAP}) banks=$(echo $BANKS | tr ' ' ',')"
-    fi
+    for B in $IBM_BANKS; do set_ibm_bank_pct "$B" "$WANT"; done
+    log "IBM: HOT=${HOT}°C -> ${WANT}% banks=[$IBM_BANKS] map=${IBM_CODEMAP}"
   else
-    set_dell_global "$CUR_PCT"
-    echo "[$(date +'%F %T')] Dell/clone: HOT=${HOT}°C -> ${CUR_PCT}%"
+    set_dell_global_pct "$WANT"
+    log "DELL: HOT=${HOT}°C -> ${WANT}%"
   fi
 
+  # 4) sleep
   sleep "$INTERVAL"
 done
 FANEOF
@@ -253,29 +232,26 @@ FANEOF
 write_defaults() {
   cat > "${DEFAULTS_PATH}" <<'DFEOF'
 # /etc/default/fan-control
-# Override environment variables for fan_control.service here.
-# Remove the leading '#' to activate a setting; defaults are in the script.
+# Override environment variables for /usr/local/sbin/fan_control.sh
 
-#INTERVAL=30
-#BASELINE_C=45
-#UP_GAIN=2
-#DOWN_GAIN=1
-#MIN_PCT=5
-#MAX_PCT=60
-#SLEW_PCT=15
-#DEADBAND_C=0
+# Core behavior
+INTERVAL=15
+BASELINE_C=45
+DEADBAND_C=1
+UP_GAIN=1.5
+DOWN_GAIN=1
+MIN_PCT=5
+MAX_PCT=50
 
-# IBM mapping: "table" (classic steps) or "linear" (0x12..0xFF)
-#IBM_CODEMAP=linear
+# Platform select (no auto-detect; set explicitly)
+VENDOR=ibm            # ibm | dell
 
-# IBM banks (addresses). If set, auto-detection is BYPASSED and ONLY these banks are used.
-# Examples:
-#IBM_BANKS="0x01"
-#IBM_BANKS="0x01 0x02"
+# IBM-only settings
+IBM_BANKS="0x01"      # set only valid banks for your chassis (e.g. x3500: 0x01)
+IBM_CODEMAP=linear     # table | linear  (table is calmer on IBM)
 
-# If you do NOT set IBM_BANKS, the script will auto-detect CPU banks each loop.
-#IBM_BANK1=0x01
-#IBM_BANK2=0x02
+# Safety / testing
+DO_WRITE=1            # 1=apply via ipmitool, 0=dry-run logs only
 DFEOF
   chmod 0644 "${DEFAULTS_PATH}"
 }
@@ -283,8 +259,9 @@ DFEOF
 write_service() {
   cat > "${SERVICE_PATH}" <<SVC
 [Unit]
-Description=Baseline-reactive Fan Control (IBM & Dell/Unisys)
+Description=Simple CPU-temp fan control (sysfs coretemp → IPMI)
 After=multi-user.target
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -293,8 +270,6 @@ EnvironmentFile=-${DEFAULTS_PATH}
 Restart=always
 RestartSec=3
 User=root
-
-# Keep hardening minimal to avoid blocking ipmitool access
 NoNewPrivileges=yes
 PrivateTmp=yes
 
@@ -313,12 +288,16 @@ summary() {
   echo "Installed:"
   echo "  Script : ${SCRIPT_PATH}"
   echo "  Service: ${SERVICE_PATH}"
-  echo "  Env    : ${DEFAULTS_PATH} (edit to tweak settings)"
+  echo "  Env    : ${DEFAULTS_PATH}"
   echo
-  echo "Commands:"
-  echo "  journalctl -u fan-control.service -f"
-  echo "  sudo systemctl edit fan-control.service      # add overrides (optional)"
+  echo "Tune and test:"
+  echo "  sudo editor ${DEFAULTS_PATH}    # set VENDOR, IBM_BANKS, etc."
   echo "  sudo systemctl restart fan-control.service"
+  echo "  journalctl -u fan-control.service -f"
+  echo
+  echo "Quick sanity (IBM x3500):"
+  echo "  VENDOR=ibm IBM_BANKS=0x01 MIN_PCT=12 MAX_PCT=50 INTERVAL=10"
+  echo
 }
 
 main() {
