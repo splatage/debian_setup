@@ -25,13 +25,24 @@ as_user() {
 }
 
 # Always source NVM before using it (fixes 'nvm: command not found')
+# Always source NVM before using it (fixes 'nvm: command not found')
 nvm_run() {
   local user="$1"; shift
   local nvm_dir="$2"; shift
-  as_user "$user" "export NVM_DIR='${nvm_dir}'; \
-    [ -s \"\$NVM_DIR/nvm.sh\" ] && . \"\$NVM_DIR/nvm.sh\"; \
-    [ -s \"\$NVM_DIR/bash_completion\" ] && . \"\$NVM_DIR/bash_completion\"; \
-    $*"
+  su - "$user" -c "bash -lc '
+    set -e
+    # Prefer explicit path; fall back to HOME/.nvm
+    if [ -s \"${nvm_dir}/nvm.sh\" ]; then
+      . \"${nvm_dir}/nvm.sh\"
+    elif [ -s \"\$HOME/.nvm/nvm.sh\" ]; then
+      . \"\$HOME/.nvm/nvm.sh\"
+    else
+      echo \"ERROR: nvm.sh not found at ${nvm_dir}/nvm.sh or \$HOME/.nvm/nvm.sh\" >&2
+      exit 1
+    fi
+    # (optional) bash_completion if present
+    [ -s \"${nvm_dir}/bash_completion\" ] && . \"${nvm_dir}/bash_completion\" || true
+    $*'"
 }
 
 append_once() {
