@@ -58,8 +58,8 @@ fi
 
 # ---------- config (env-overridable) ----------
 INTERVAL=${INTERVAL:-15}          # seconds between loops
-BASELINE_C=${BASELINE_C:-45}      # target quiet temp (°C)
-UP_GAIN=${UP_GAIN:-1.5}             # % per +1°C above baseline
+BASELINE_C=${BASELINE_C:-50}      # target quiet temp (°C)
+UP_GAIN=${UP_GAIN:-2}             # % per +1°C above baseline
 DOWN_GAIN=${DOWN_GAIN:-1}         # % per -1°C below baseline
 DEADBAND_C=${DEADBAND_C:-1}       # °C around baseline to hold MIN_PCT
 MIN_PCT=${MIN_PCT:-5}            # floor %
@@ -236,9 +236,9 @@ write_defaults() {
 
 # Core behavior
 INTERVAL=15
-BASELINE_C=45
+BASELINE_C=50
 DEADBAND_C=1
-UP_GAIN=1.5
+UP_GAIN=2
 DOWN_GAIN=1
 MIN_PCT=5
 MAX_PCT=50
