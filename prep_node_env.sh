@@ -8,7 +8,7 @@ set -euo pipefail
 # ---------------------- Defaults (overridable by flags) -----------------------
 TARGET_USER=""
 NODE_VERSION="lts/*"              # default: latest LTS release; use --node node for latest current
-NVM_INSTALL_URL="https://raw.githubusercontent.com/nvm-sh/nvm/install.sh"  # always latest installer
+NVM_INSTALL_URL="https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh"  # always latest installer
 QUIET=0
 
 # ---------------------- Helpers ----------------------------------------------
