@@ -87,7 +87,7 @@ while [[ $# -gt 0 ]]; do
     --quiet)        QUIET=1; shift ;;
     --help|-h)      print_help; exit 0 ;;
     *)              err "Unknown argument: $1 (use --help)";;
-  endcase
+  esac
 done
 
 # ---------------------- Validations ------------------------------------------
@@ -146,7 +146,7 @@ nvm_run "$TARGET_USER" "$NVM_DIR_USER" "nvm use default"
 [[ $QUIET -eq 1 ]] || log "Installing PM2 (user-global) for ${TARGET_USER} ..."
 nvm_run "$TARGET_USER" "$NVM_DIR_USER" "npm install -g pm2"
 
-# ---------------------- Verification (optional but helpful) -------------------
+# ---------------------- Verification (optional) -------------------------------
 nvm_run "$TARGET_USER" "$NVM_DIR_USER" "node -v && npm -v && pm2 -v" || true
 
 # ---------------------- Completion -------------------------------------------
