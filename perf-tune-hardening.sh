@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # Monolithic Performance Tuning & SSH Hardening Script for Debian-based Systems
-# Version: v5-confirm (final candidate, verbose + sshd dep locked)
+# Version: v5-confirm (verbose + sshd dep locked + THP runtime + udevadm path + CPU gov select)
 #
 
 set -euo pipefail
@@ -21,6 +21,9 @@ confirm() {
   [[ "$response" =~ ^[Yy]$ ]]
 }
 
+# Resolve udevadm path (Debian/Ubuntu: /usr/bin/udevadm)
+UDEVADM_BIN="$(command -v udevadm 2>/dev/null || echo /usr/bin/udevadm)"
+
 # -------- Pre-flight --------
 
 check_root() {
@@ -32,24 +35,22 @@ check_root() {
 }
 
 check_dependencies() {
-  info "Checking dependencies (ethtool, iproute2, openssh-server)..."
+  info "Checking dependencies (ethtool, iproute2, openssh-server, udevadm)..."
   missing_pkgs=()
-  # ethtool
   if ! command -v ethtool >/dev/null 2>&1; then
-    missing_pkgs+=("ethtool")
-    warn "Missing: ethtool"
+    missing_pkgs+=("ethtool"); warn "Missing: ethtool"
   fi
-  # ip
   if ! command -v ip >/dev/null 2>&1; then
-    missing_pkgs+=("iproute2")
-    warn "Missing: iproute2"
+    missing_pkgs+=("iproute2"); warn "Missing: iproute2"
   fi
-  # sshd (openssh-server)
   if ! command -v sshd >/dev/null 2>&1; then
-    missing_pkgs+=("openssh-server")
-    warn "Missing: openssh-server (sshd)"
+    missing_pkgs+=("openssh-server"); warn "Missing: openssh-server (sshd)"
   fi
-
+  if ! command -v udevadm >/dev/null 2>&1; then
+    warn "udevadm not found in PATH; assuming ${UDEVADM_BIN}"
+  else
+    ok "udevadm: $(command -v udevadm)"
+  fi
   if [ "${#missing_pkgs[@]}" -gt 0 ]; then
     info "Packages required: ${missing_pkgs[*]}"
     read -rp "Install required packages via apt now? [y/N]: " choice
@@ -142,7 +143,7 @@ select_profile() {
   info "Selected profile: ${PROFILE} (qdisc=$QDISC, cc=$TCP_CC)"
 }
 
-# -------- NEW: Storage readahead profile (SSD/NVMe) --------
+# -------- Storage readahead profile (SSD/NVMe) --------
 
 choose_storage_ra_profile() {
   echo "Select storage readahead profile (SSD/NVMe):"
@@ -157,13 +158,41 @@ choose_storage_ra_profile() {
   done
 }
 
+# -------- NEW: CPU governor selection --------
+
+choose_cpu_governor() {
+  local govfile="/sys/devices/system/cpu/cpu0/cpufreq/scaling_available_governors"
+  local govs=""
+  if [ -r "$govfile" ]; then
+    read -r govs < "$govfile"
+  else
+    govs="performance powersave schedutil ondemand conservative"
+    warn "Could not read $govfile; falling back to common governors: $govs"
+  fi
+
+  echo "Available CPU governors: $govs"
+  # Build select menu dynamically
+  IFS=' ' read -r -a GOV_ARRAY <<< "$govs"
+  PS3="Select CPU governor: "
+  select g in "${GOV_ARRAY[@]}"; do
+    if [[ -n "${g:-}" ]]; then
+      export CPU_GOV="$g"
+      ok "CPU governor selected: $CPU_GOV"
+      break
+    else
+      warn "Invalid choice."
+    fi
+  done
+}
+
 # -------- Steps --------
 
 apply_sysctl() {
   info "Applying sysctl..."
   mkdir -p /etc/sysctl.d
   cat > /etc/sysctl.d/99-perf-base.conf <<'EOF'
-vm.swappiness=10
+vm.swappiness=1
+vm.overcommit_memory=1
 kernel.kptr_restrict=2
 net.ipv4.conf.all.accept_redirects=0
 net.ipv4.conf.default.accept_redirects=0
@@ -194,14 +223,15 @@ EOF
 }
 
 apply_zfs_arc_limits() {
-  info "Setting ZFS ARC limits..."
+  info "Setting ZFS ARC options..."
   mkdir -p /etc/modprobe.d
   cat > /etc/modprobe.d/zfs-tuning.conf <<'EOF'
 options zfs zfs_arc_max=6442450944
 options zfs zfs_arc_min=2147483648
+options zfs zfs_prefetch_disable=1
 EOF
   update-initramfs -u
-  ok "ZFS ARC limits set (initramfs updated)"
+  ok "ZFS tuning written (ARC + prefetch), initramfs updated"
 }
 
 apply_nic_tuning() {
@@ -215,7 +245,7 @@ set -eu
 [ -f /etc/default/perf-tuning ] && source /etc/default/perf-tuning
 PROFILE=${PROFILE:-auto}
 declare -A PROFILES
-PROFILES["lan_low_latency"]="adaptive-rx off;adaptive-tx off;rx-usecs 50;tx-usecs 50"
+PROFILES["lan_low_latency"]="adaptive-rx off;adaptive-tx off;rx-usecs 25;tx-usecs 25"
 PROFILES["datacenter_10g"]="adaptive-rx on;adaptive-tx on"
 PROFILES["auto"]="adaptive-rx on;adaptive-tx on"
 PROFILES["wan_throughput"]="adaptive-rx on;adaptive-tx on"
@@ -250,13 +280,14 @@ EOF
   ok "NIC coalescing applied (and service installed)"
 }
 
-# Persistent udev I/O + NIC rules, CPU governor oneshot (as agreed)
+# Persistent udev I/O + NIC rules, CPU governor oneshot
 apply_io_and_cpu_sched() {
   info "Configuring I/O scheduler & read-ahead (udev), NIC txqueuelen (udev), and CPU governor..."
 
   SSD_RA_KB=${SSD_RA_KB:-16}
   NVME_RA_KB=${NVME_RA_KB:-16}
-  info "Storage readahead: SSD=${SSD_RA_KB} KB, NVMe=${NVME_RA_KB} KB"
+  CPU_GOV=${CPU_GOV:-performance}
+  info "Storage readahead: SSD=${SSD_RA_KB} KB, NVMe=${NVME_RA_KB} KB; CPU governor=${CPU_GOV}"
 
   # Storage udev rules
   : > /etc/udev/rules.d/60-ssd-scheduler.rules
@@ -282,22 +313,23 @@ apply_io_and_cpu_sched() {
   echo '# KERNEL=="ppp[0-9]*", RUN+="/sbin/ip link set %k mtu 1492"' >> /etc/udev/rules.d/99-nic-tuning.rules
   ok "Wrote /etc/udev/rules.d/99-nic-tuning.rules"
 
-  udevadm control --reload-rules
-  udevadm trigger
+  # Apply udev changes now (use detected path)
+  "$UDEVADM_BIN" control --reload-rules
+  "$UDEVADM_BIN" trigger
   ok "udev rules reloaded and triggered"
 
   # CPU governor now + persist via oneshot
-  info "Setting CPU governor to performance (now and via systemd)..."
+  info "Setting CPU governor to ${CPU_GOV} (now and via systemd)..."
   for g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
-    echo performance > "$g" 2>/dev/null || true
+    echo "${CPU_GOV}" > "$g" 2>/dev/null || true
   done
-  cat > /etc/systemd/system/cpu-governor.service <<'EOF'
+  cat > /etc/systemd/system/cpu-governor.service <<EOF
 [Unit]
-Description=Set CPU governor to performance
+Description=Set CPU governor to ${CPU_GOV}
 
 [Service]
 Type=oneshot
-ExecStart=/bin/bash -c 'for g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do echo performance > "$g" 2>/dev/null || true; done'
+ExecStart=/bin/bash -c 'for g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do echo ${CPU_GOV} > "$g" 2>/dev/null || true; done'
 RemainAfterExit=yes
 
 [Install]
@@ -305,7 +337,43 @@ WantedBy=multi-user.target
 EOF
   systemctl daemon-reload
   systemctl enable --now cpu-governor.service
-  ok "CPU governor service installed and executed"
+  ok "CPU governor service installed and executed (governor=${CPU_GOV})"
+}
+
+# Transparent Huge Pages runtime toggle (no GRUB edit)
+apply_thp_runtime() {
+  info "Setting Transparent Huge Pages to 'never' (runtime + persistent service)..."
+  # Immediate runtime setting
+  if [ -w /sys/kernel/mm/transparent_hugepage/enabled ]; then
+    echo never > /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null || true
+  else
+    warn "THP 'enabled' path not writable or missing"
+  fi
+  if [ -w /sys/kernel/mm/transparent_hugepage/defrag ]; then
+    echo never > /sys/kernel/mm/transparent_hugepage/defrag 2>/dev/null || true
+  else
+    warn "THP 'defrag' path not writable or missing"
+  fi
+
+  # Persistence via oneshot service (easy to toggle/disable later)
+  cat > /etc/systemd/system/thp-toggle.service <<'EOF'
+[Unit]
+Description=Disable Transparent Huge Pages (runtime)
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -c '
+  [ -w /sys/kernel/mm/transparent_hugepage/enabled ] && echo never > /sys/kernel/mm/transparent_hugepage/enabled || true;
+  [ -w /sys/kernel/mm/transparent_hugepage/defrag ] && echo never > /sys/kernel/mm/transparent_hugepage/defrag || true;
+'
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  systemctl daemon-reload
+  systemctl enable --now thp-toggle.service
+  ok "THP disabled at runtime and persisted via systemd (no GRUB edit)"
 }
 
 apply_limits() {
@@ -357,14 +425,16 @@ main() {
   check_dependencies
   select_profile
   choose_storage_ra_profile
+  choose_cpu_governor
 
   echo ""
   echo "==== Confirm Each Step ===="
 
   if confirm "Apply sysctl profile settings?"; then apply_sysctl; else info "Sysctl: skipped"; fi
-  if confirm "Apply ZFS ARC memory limits?"; then apply_zfs_arc_limits; else info "ZFS ARC: skipped"; fi
+  if confirm "Apply ZFS ARC + prefetch tuning?"; then apply_zfs_arc_limits; else info "ZFS: skipped"; fi
   if confirm "Apply NIC coalescing and ring tuning (service)?"; then apply_nic_tuning; else info "NIC coalescing: skipped"; fi
   if confirm "Apply IO scheduler (udev) + CPU governor tuning?"; then apply_io_and_cpu_sched; else info "I/O + CPU: skipped"; fi
+  if confirm "Disable Transparent Huge Pages (runtime + persistent service)?"; then apply_thp_runtime; else info "THP: skipped"; fi
   if confirm "Apply ulimit increases?"; then apply_limits; else info "Limits: skipped"; fi
   if confirm "Apply SSH hardening?"; then apply_ssh_hardening; else info "SSH hardening: skipped"; fi
   if confirm "Disable IPv6 via GRUB?"; then set_grub_ipv6_disable; else info "GRUB IPv6: skipped"; fi
