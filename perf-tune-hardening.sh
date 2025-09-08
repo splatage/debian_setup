@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # Monolithic Performance Tuning & SSH Hardening Script for Debian-based Systems
-# Version: v5-confirm (verbose + sshd dep locked + THP runtime + udevadm path + CPU gov select + extras)
+# Version: v5-confirm (robust: brittle paths hardened; verbose logging)
 #
 
 set -euo pipefail
@@ -218,7 +218,9 @@ EOF
     for s in "${SYSCTL_SETTINGS[@]}"; do echo "$s"; done
   } > "$CONF_FILE"
 
-  sysctl --system > /dev/null
+  # Targeted reloads to avoid failures from unrelated sysctl files
+  sysctl -p /etc/sysctl.d/99-perf-base.conf  >/dev/null || warn "Sysctl reload failed for 99-perf-base.conf"
+  sysctl -p /etc/sysctl.d/98-perf-profile.conf >/dev/null || warn "Sysctl reload failed for 98-perf-profile.conf"
   ok "Sysctl applied"
 }
 
@@ -240,10 +242,9 @@ net.ipv4.conf.default.log_martians=1
 net.ipv6.conf.all.accept_ra=0
 net.ipv6.conf.default.accept_ra=0
 EOF
-  sysctl --system >/dev/null
+  sysctl -p /etc/sysctl.d/94-net-hardening.conf >/dev/null || warn "Sysctl reload failed for 94-net-hardening.conf"
   ok "Network hardening sysctls applied"
 }
-
 
 apply_zfs_arc_limits() {
   info "ZFS tuning wizard (ARC size optional + prefetch disable) — simple unit with static values"
@@ -265,31 +266,23 @@ apply_zfs_arc_limits() {
   local PREFETCH_DISABLE=1
 
   case "$mode" in
-    1)
-      info "ARC limits will NOT be set; only prefetch will be disabled."
-      ;;
-    2)
-      read -rp "ARC max (GiB) [default ${MAX_GB}]: " ans
-      MAX_GB="${ans:-$MAX_GB}"
-      ARC_MAX_B=$((MAX_GB*1024*1024*1024))
-      info "Selected: ARC max only (${MAX_GB} GiB)"
-      ;;
-    3)
-      read -rp "ARC max (GiB) [default ${MAX_GB}]: " ans
-      MAX_GB="${ans:-$MAX_GB}"
-      read -rp "ARC min (GiB) [default ${MIN_GB}]: " ans2
-      MIN_GB="${ans2:-$MIN_GB}"
-      ARC_MAX_B=$((MAX_GB*1024*1024*1024))
-      ARC_MIN_B=$((MIN_GB*1024*1024*1024))
-      info "Selected: ARC min=${MIN_GB} GiB, max=${MAX_GB} GiB"
-      ;;
-    4)
-      read -rp "Fixed ARC size (GiB) to pin (min=max) [default ${MAX_GB}]: " ans
-      MAX_GB="${ans:-$MAX_GB}"
-      ARC_MAX_B=$((MAX_GB*1024*1024*1024))
-      ARC_MIN_B=$ARC_MAX_B
-      warn "Pinning ARC at ${MAX_GB} GiB (min=max). Ensure memory headroom for MySQL/Redis!"
-      ;;
+    1) info "ARC limits will NOT be set; only prefetch will be disabled." ;;
+    2) read -rp "ARC max (GiB) [default ${MAX_GB}]: " ans
+       MAX_GB="${ans:-$MAX_GB}"
+       ARC_MAX_B=$((MAX_GB*1024*1024*1024))
+       info "Selected: ARC max only (${MAX_GB} GiB)" ;;
+    3) read -rp "ARC max (GiB) [default ${MAX_GB}]: " ans
+       MAX_GB="${ans:-$MAX_GB}"
+       read -rp "ARC min (GiB) [default ${MIN_GB}]: " ans2
+       MIN_GB="${ans2:-$MIN_GB}"
+       ARC_MAX_B=$((MAX_GB*1024*1024*1024))
+       ARC_MIN_B=$((MIN_GB*1024*1024*1024))
+       info "Selected: ARC min=${MIN_GB} GiB, max=${MAX_GB} GiB" ;;
+    4) read -rp "Fixed ARC size (GiB) to pin (min=max) [default ${MAX_GB}]: " ans
+       MAX_GB="${ans:-$MAX_GB}"
+       ARC_MAX_B=$((MAX_GB*1024*1024*1024))
+       ARC_MIN_B=$ARC_MAX_B
+       warn "Pinning ARC at ${MAX_GB} GiB (min=max). Ensure memory headroom for MySQL/Redis!" ;;
   esac
 
   # Immediate (best effort) runtime apply
@@ -318,10 +311,7 @@ Type=oneshot
 ExecStart=/bin/sh -c 'i=0; while [ $i -lt 20 ] && [ ! -e /sys/module/zfs/parameters/zfs_prefetch_disable ]; do i=$((i+1)); sleep 0.5; done'
 UNIT_HEAD
 
-    # Prefetch toggle
     echo "ExecStart=/bin/sh -c '[ -w /sys/module/zfs/parameters/zfs_prefetch_disable ] && printf %s ${PREFETCH_DISABLE} > /sys/module/zfs/parameters/zfs_prefetch_disable || true'"
-
-    # Optional ARC max/min lines (only emit if the value is set)
     if [ -n "$ARC_MAX_B" ]; then
       echo "ExecStart=/bin/sh -c '[ -w /sys/module/zfs/parameters/zfs_arc_max ] && printf %s ${ARC_MAX_B} > /sys/module/zfs/parameters/zfs_arc_max || true'"
     fi
@@ -338,7 +328,7 @@ UNIT_TAIL
   } > "$svc"
 
   systemctl daemon-reload
-  systemctl enable --now zfs-arc-tuning.service
+  systemctl enable --now zfs-arc-tuning.service || warn "zfs-arc-tuning.service failed to start"
   ok "Installed and started zfs-arc-tuning.service (simple static unit)"
 
   # Summary
@@ -354,44 +344,68 @@ apply_nic_tuning() {
 
   cat > /usr/local/sbin/tune-nic.sh <<'EOF'
 #!/bin/bash
-set -eu
+# Best-effort: never abort caller
+set -u
 [ -f /etc/default/perf-tuning ] && source /etc/default/perf-tuning
 PROFILE=${PROFILE:-auto}
+
 declare -A PROFILES
 PROFILES["lan_low_latency"]="adaptive-rx off;adaptive-tx off;rx-usecs 25;tx-usecs 25"
 PROFILES["datacenter_10g"]="adaptive-rx on;adaptive-tx on"
 PROFILES["auto"]="adaptive-rx on;adaptive-tx on"
 PROFILES["wan_throughput"]="adaptive-rx on;adaptive-tx on"
+
+log(){ echo "[tune-nic] $*"; }
+
 tune_one() {
   local ifc="$1"
   local settings="${PROFILES[$PROFILE]}"
+  log "Tuning $ifc (profile=$PROFILE)"
   IFS=';' read -ra pairs <<< "$settings"
-  for pair in "${pairs[@]}"; do ethtool -C "$ifc" $pair 2>/dev/null || true; done
+  for pair in "${pairs[@]}"; do ethtool -C "$ifc" $pair >/dev/null 2>&1 || log "WARN: ethtool -C '$pair' failed on $ifc"; done
+
   if [ "$PROFILE" = "datacenter_10g" ]; then
-    read -r rx tx < <(ethtool -g "$ifc" | awk '/^RX:/{r=$2} /^TX:/{print r, $2}')
-    [ "${rx:-}" ] && ethtool -G "$ifc" rx "$rx" tx "$tx" 2>/dev/null || true
+    if ethtool -g "$ifc" >/dev/null 2>&1; then
+      read -r rx tx < <(ethtool -g "$ifc" | awk '/^RX:/{r=$2} /^TX:/{print r, $2}') || true
+      if [[ -n "${rx:-}" && -n "${tx:-}" ]]; then
+        ethtool -G "$ifc" rx "$rx" tx "$tx" >/dev/null 2>&1 || log "WARN: ethtool -G RX=$rx TX=$tx failed on $ifc"
+      else
+        log "INFO: $ifc does not expose RX/TX ring maxima"
+      fi
+    else
+      log "INFO: $ifc does not support ethtool -g (skipping rings)"
+    fi
   fi
 }
-for i in $(ls /sys/class/net | grep -E '^(en|eth)'); do
-  [ "$(cat /sys/class/net/$i/operstate)" = "up" ] && tune_one "$i"
+
+ifaces=$(ls /sys/class/net 2>/dev/null | grep -E '^(en|eth)' || true)
+[ -z "$ifaces" ] && { log "INFO: No en*/eth* interfaces; nothing to do."; exit 0; }
+
+for i in $ifaces; do
+  state="$(cat /sys/class/net/$i/operstate 2>/dev/null || echo down)"
+  [ "$state" = "up" ] && tune_one "$i" || log "INFO: $i is $state; skipping."
 done
+exit 0
 EOF
   chmod +x /usr/local/sbin/tune-nic.sh
 
   cat > /etc/systemd/system/tune-nic.service <<'EOF'
 [Unit]
-Description=Apply NIC Tuning
+Description=Apply NIC Tuning (coalescing/rings)
 After=network.target
+Wants=network.target
+
 [Service]
 Type=oneshot
 ExecStart=/usr/local/sbin/tune-nic.sh
+
 [Install]
 WantedBy=multi-user.target
 EOF
 
-  /usr/local/sbin/tune-nic.sh
+  /usr/local/sbin/tune-nic.sh || warn "tune-nic.sh returned non-zero; continuing."
   systemctl daemon-reload
-  systemctl enable --now tune-nic.service
+  systemctl enable --now tune-nic.service || warn "tune-nic.service failed to start"
   ok "NIC coalescing applied (and service installed)"
 }
 
@@ -427,7 +441,7 @@ apply_io_and_cpu_sched() {
   while IFS= read -r DEV; do
     DEVRANGE="$(echo "$DEV" | sed 's/[0-9]/[0-9]/g')"
     echo "KERNEL==\"$DEVRANGE\", RUN+=\"${IP_BIN} link set %k txqueuelen 256\"" >> /etc/udev/rules.d/99-nic-tuning.rules
-  done < <(ip -o link show | awk -F': ' '{print $2}' | grep -Ev '^(lo|docker|veth)')
+  done < <(ip -o link show | awk -F': ' '{print $2}' | grep -Ev '^(lo|docker|veth)' || true)
   echo "KERNEL==\"tun[0-9]*\", RUN+=\"${IP_BIN} link set %k txqueuelen 256\"" >> /etc/udev/rules.d/99-nic-tuning.rules
   echo '# KERNEL=="ppp[0-9]*", RUN+="/sbin/ip link set %k mtu 1492"' >> /etc/udev/rules.d/99-nic-tuning.rules
   ok "Wrote /etc/udev/rules.d/99-nic-tuning.rules"
@@ -455,7 +469,7 @@ RemainAfterExit=yes
 WantedBy=multi-user.target
 EOF
   systemctl daemon-reload
-  systemctl enable --now cpu-governor.service
+  systemctl enable --now cpu-governor.service || warn "cpu-governor.service failed to start"
   ok "CPU governor service installed and executed (governor=${CPU_GOV})"
 }
 
@@ -488,7 +502,7 @@ RemainAfterExit=yes
 WantedBy=multi-user.target
 EOF
   systemctl daemon-reload
-  systemctl enable --now thp-toggle.service
+  systemctl enable --now thp-toggle.service || warn "thp-toggle.service failed to start"
   ok "THP disabled at runtime and persisted via systemd (no GRUB edit)"
 }
 
@@ -516,7 +530,7 @@ Ciphers aes256-gcm@openssh.com,aes128-gcm@openssh.com
 MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com
 EOF
   if sshd -t; then
-    systemctl reload ssh
+    systemctl reload ssh || warn "Failed to reload sshd"
     ok "sshd config validated and reloaded"
   else
     warn "sshd -t failed; not reloading to avoid lockout"
@@ -534,7 +548,7 @@ set_grub_ipv6_disable() {
   else
     echo 'GRUB_CMDLINE_LINUX="ipv6.disable=1"' >> /etc/default/grub
   fi
-  update-grub
+  update-grub || warn "update-grub failed; IPv6 disable will take effect after successful grub update"
   ok "GRUB updated to disable IPv6"
 }
 
@@ -552,7 +566,7 @@ EOF
   cat > /etc/sysctl.d/93-coredump.conf <<'EOF'
 fs.suid_dumpable=0
 EOF
-  sysctl --system >/dev/null
+  sysctl -p /etc/sysctl.d/93-coredump.conf >/dev/null || warn "Sysctl reload failed for 93-coredump.conf"
   systemctl restart systemd-coredump 2>/dev/null || true
   ok "Coredumps disabled (storage=none, suid_dumpable=0)"
 }
@@ -571,7 +585,6 @@ apply_energy_perf_bias() {
     ok "Set energy_perf_bias=0 on $count CPUs"
   fi
 
-  # Persist via oneshot service (best effort)
   cat > /etc/systemd/system/energy-perf-bias.service <<'EOF'
 [Unit]
 Description=Set CPU energy_performance_bias to performance (0)
@@ -604,7 +617,7 @@ net.ipv4.tcp_keepalive_time=300
 net.ipv4.tcp_keepalive_intvl=30
 net.ipv4.tcp_keepalive_probes=5
 EOF
-  sysctl --system >/dev/null
+  sysctl -p /etc/sysctl.d/95-keepalives.conf >/dev/null || warn "Sysctl reload failed for 95-keepalives.conf"
   ok "TCP keepalives applied"
 }
 
@@ -629,7 +642,7 @@ Options=mode=1777,strictatime,nosuid,nodev,size=${TMP_SIZE}
 WantedBy=local-fs.target
 EOF
   systemctl daemon-reload
-  systemctl enable --now tmp.mount
+  systemctl enable --now tmp.mount || warn "Failed to enable/start tmp.mount"
   ok "/tmp mounted as tmpfs (size=${TMP_SIZE})"
 }
 
@@ -643,7 +656,7 @@ RuntimeMaxUse=256M
 RuntimeKeepFree=64M
 # Feel free to adjust the above caps to your environment.
 EOF
-  systemctl restart systemd-journald
+  systemctl restart systemd-journald || warn "journald restart failed"
   ok "journald set to RAM (volatile). Logs won't persist across reboot."
 }
 
@@ -652,7 +665,7 @@ ensure_irqbalance() {
   if ! command -v irqbalance >/dev/null 2>&1; then
     apt-get update && apt-get install -y irqbalance
   fi
-  systemctl enable --now irqbalance
+  systemctl enable --now irqbalance || warn "Failed to enable/start irqbalance"
   systemctl is-active --quiet irqbalance && ok "irqbalance is active" || warn "irqbalance not active"
 }
 
@@ -670,20 +683,15 @@ EOF
   # Apply sysctls now (best effort)
   sysctl -w kernel.numa_balancing=0 >/dev/null || true
   sysctl -w vm.zone_reclaim_mode=0    >/dev/null || true
-  sysctl --system >/dev/null
+  sysctl -p /etc/sysctl.d/97-numa.conf >/dev/null || warn "Sysctl reload failed for 97-numa.conf"
 
-  # ---- KSM precaution: if KSM is running, do not merge across NUMA nodes ----
+  # ---- KSM precaution (only if KSM running) ----
   local KSM_DIR="/sys/kernel/mm/ksm"
   if [ -d "$KSM_DIR" ] && [ -r "$KSM_DIR/run" ]; then
     local ksm_run; read -r ksm_run < "$KSM_DIR/run" || ksm_run=0
     if [ "${ksm_run:-0}" -gt 0 ]; then
-      # Prefer modern knob; fall back to older name if present
-      if [ -w "$KSM_DIR/merge_across_nodes" ]; then
-        echo 0 > "$KSM_DIR/merge_across_nodes" 2>/dev/null || true
-      fi
-      if [ -w "$KSM_DIR/merge_nodes" ]; then
-        echo 0 > "$KSM_DIR/merge_nodes" 2>/dev/null || true
-      fi
+      [ -w "$KSM_DIR/merge_across_nodes" ] && echo 0 > "$KSM_DIR/merge_across_nodes" 2>/dev/null || true
+      [ -w "$KSM_DIR/merge_nodes" ]        && echo 0 > "$KSM_DIR/merge_nodes"        2>/dev/null || true
       ok "KSM is running: disabled cross-node merging"
     else
       info "KSM present but not running (run=${ksm_run}); no action needed"
@@ -698,8 +706,7 @@ EOF
 Description=Ensure KSM does not merge across NUMA nodes
 ConditionPathExists=/sys/kernel/mm/ksm
 After=multi-user.target
-# If your distro ships ksm/ksmtuned units, you can optionally add:
-# After=ksm.service ksmtuned.service
+# After=ksm.service ksmtuned.service  # uncomment if those units exist
 
 [Service]
 Type=oneshot
@@ -707,7 +714,6 @@ ExecStart=/bin/bash -c '
   set -euo pipefail
   KSM_DIR=/sys/kernel/mm/ksm
   [ -r "$KSM_DIR/run" ] || exit 0
-  # Wait briefly if something else is toggling KSM at boot
   for i in {1..10}; do [ -e "$KSM_DIR/run" ] && break; sleep 0.2; done
   ksm_run=$(cat "$KSM_DIR/run" 2>/dev/null || echo 0)
   if [ "$ksm_run" -gt 0 ]; then
@@ -723,27 +729,22 @@ WantedBy=multi-user.target
 EOF
 
   systemctl daemon-reload
-  systemctl enable --now ksm-numa-compat.service
+  systemctl enable --now ksm-numa-compat.service || warn "ksm-numa-compat.service failed to start"
   ok "NUMA basics applied and KSM cross-node merging disabled (persisted)"
 }
-
 
 apply_numad_service() {
   info "Checking NUMA topology and setting up numad (optional)..."
 
-  # Quick detection: require >1 NUMA node
   local nodes_file="/sys/devices/system/node/online"
   local node_count=1
   if [ -r "$nodes_file" ]; then
-    # e.g., "0-1" or "0,1,2,3"
     local spec; read -r spec < "$nodes_file"
-    # Expand ranges to count nodes
     if [[ "$spec" =~ - ]]; then
       local start=${spec%-*}; start=${start%,*}
-      local end=${spec#*-}; end=${end%,*}
+      local end=${spec#*-};   end=${end%,*}
       node_count=$(( end - start + 1 ))
     else
-      # count commas + 1
       node_count=$(( $(echo "$spec" | awk -F',' '{print NF}') ))
     fi
   fi
@@ -754,7 +755,6 @@ apply_numad_service() {
   fi
   ok "Detected ${node_count} NUMA nodes — numad may help locality."
 
-  # Ensure package
   if ! command -v numad >/dev/null 2>&1; then
     read -rp "Install 'numad' package now? [y/N]: " a
     if [[ "$a" =~ ^[Yy]$ ]]; then
@@ -765,14 +765,12 @@ apply_numad_service() {
     fi
   fi
 
-  # Sanity: cpuset controller presence (numad relies on cpusets)
   if [ ! -d /sys/fs/cgroup/cpuset ] && ! mount | grep -q "cgroup2 on /sys/fs/cgroup"; then
     warn "cpuset cgroup controller not found; numad may not operate. Continuing anyway."
   fi
 
-  # Use distro-provided unit if present; otherwise create a minimal one
   if systemctl list-unit-files | grep -q '^numad\.service'; then
-    systemctl enable --now numad.service
+    systemctl enable --now numad.service || warn "numad.service failed to start"
   else
     warn "numad.service not found; creating a simple unit."
     cat > /etc/systemd/system/numad.service <<'EOF'
@@ -790,12 +788,9 @@ RestartSec=5s
 WantedBy=multi-user.target
 EOF
     systemctl daemon-reload
-    systemctl enable --now numad.service
+    systemctl enable --now numad.service || warn "numad.service failed to start"
   fi
 
-  # Default behavior is fine; if you want to tweak scan interval later:
-  #   Edit ExecStart to: /usr/sbin/numad -i 5-30
-  # (defaults are ~5–15s per man page)
   ok "numad enabled and started. Monitor with: journalctl -u numad -f"
 }
 
@@ -824,7 +819,6 @@ main() {
   if confirm "Disable system coredumps (recommended for prod)?"; then disable_coredumps; else info "Coredumps: left enabled"; fi
   if confirm "Disable IPv6 via GRUB?"; then set_grub_ipv6_disable; else info "GRUB IPv6: skipped"; fi
   if confirm "Ensure irqbalance is installed and enabled?"; then ensure_irqbalance; else info "irqbalance: skipped"; fi
-
 
   # ---- New minimal-complexity extras ----
   if confirm "Set CPU Energy-Performance Bias to performance (0) now and on boot?"; then apply_energy_perf_bias; else info "Energy-Perf-Bias: skipped"; fi
