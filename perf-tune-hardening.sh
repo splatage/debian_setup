@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # Monolithic Performance Tuning & SSH Hardening Script for Debian-based Systems
-# Version: v5-confirm (verbose + sshd dep locked + THP runtime + udevadm path + CPU gov select)
+# Version: v5-confirm (verbose + sshd dep locked + THP runtime + udevadm path + CPU gov select + extras)
 #
 
 set -euo pipefail
@@ -158,7 +158,7 @@ choose_storage_ra_profile() {
   done
 }
 
-# -------- NEW: CPU governor selection --------
+# -------- CPU governor selection --------
 
 choose_cpu_governor() {
   local govfile="/sys/devices/system/cpu/cpu0/cpufreq/scaling_available_governors"
@@ -171,7 +171,6 @@ choose_cpu_governor() {
   fi
 
   echo "Available CPU governors: $govs"
-  # Build select menu dynamically
   IFS=' ' read -r -a GOV_ARRAY <<< "$govs"
   PS3="Select CPU governor: "
   select g in "${GOV_ARRAY[@]}"; do
@@ -313,7 +312,7 @@ apply_io_and_cpu_sched() {
   echo '# KERNEL=="ppp[0-9]*", RUN+="/sbin/ip link set %k mtu 1492"' >> /etc/udev/rules.d/99-nic-tuning.rules
   ok "Wrote /etc/udev/rules.d/99-nic-tuning.rules"
 
-  # Apply udev changes now (use detected path)
+  # Apply udev changes now
   "$UDEVADM_BIN" control --reload-rules
   "$UDEVADM_BIN" trigger
   ok "udev rules reloaded and triggered"
@@ -343,7 +342,6 @@ EOF
 # Transparent Huge Pages runtime toggle (no GRUB edit)
 apply_thp_runtime() {
   info "Setting Transparent Huge Pages to 'never' (runtime + persistent service)..."
-  # Immediate runtime setting
   if [ -w /sys/kernel/mm/transparent_hugepage/enabled ]; then
     echo never > /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null || true
   else
@@ -354,8 +352,6 @@ apply_thp_runtime() {
   else
     warn "THP 'defrag' path not writable or missing"
   fi
-
-  # Persistence via oneshot service (easy to toggle/disable later)
   cat > /etc/systemd/system/thp-toggle.service <<'EOF'
 [Unit]
 Description=Disable Transparent Huge Pages (runtime)
@@ -418,20 +414,98 @@ set_grub_ipv6_disable() {
   fi
 }
 
-apply_numa_basics() {
-  info "Applying safe NUMA sysctls: kernel.numa_balancing=0, vm.zone_reclaim_mode=0 ..."
-  mkdir -p /etc/sysctl.d
-  cat > /etc/sysctl.d/97-numa.conf <<'EOF'
-# NUMA basics for DB/Redis/low-latency hosts
-kernel.numa_balancing=0
-vm.zone_reclaim_mode=0
+# -------- NEW: Minimal-complexity extras --------
+
+apply_energy_perf_bias() {
+  info "Setting Energy-Performance Bias to 'performance' (0) across CPUs..."
+  local count=0
+  for f in /sys/devices/system/cpu/cpu*/power/energy_perf_bias; do
+    [ -e "$f" ] || continue
+    echo 0 > "$f" 2>/dev/null || true
+    count=$((count+1))
+  done
+  if [ "$count" -eq 0 ]; then
+    warn "energy_perf_bias not exposed on this platform (Intel-only typically); skipping runtime set"
+  else
+    ok "Set energy_perf_bias=0 on $count CPUs"
+  fi
+
+  # Persist via oneshot service (best effort)
+  cat > /etc/systemd/system/energy-perf-bias.service <<'EOF'
+[Unit]
+Description=Set CPU energy_performance_bias to performance (0)
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -c '
+count=0
+for f in /sys/devices/system/cpu/cpu*/power/energy_perf_bias; do
+  [ -e "$f" ] || continue
+  echo 0 > "$f" 2>/dev/null || true
+  count=$((count+1))
+done
+echo "Set energy_perf_bias=0 on $count CPU(s)"
+'
+
+[Install]
+WantedBy=multi-user.target
 EOF
-  # Apply immediately
-  sysctl -w kernel.numa_balancing=0 >/dev/null || true
-  sysctl -w vm.zone_reclaim_mode=0    >/dev/null || true
-  sysctl --system >/dev/null
-  ok "NUMA sysctls applied and persisted"
+  systemctl daemon-reload
+  systemctl enable --now energy-perf-bias.service 2>/dev/null || true
+  ok "Energy-Perf-Bias oneshot installed (best effort)"
 }
+
+apply_keepalives() {
+  info "Applying TCP keepalive sysctls..."
+  cat > /etc/sysctl.d/95-keepalives.conf <<'EOF'
+# Conservative TCP keepalive defaults for long-lived app/db connections
+net.ipv4.tcp_keepalive_time=300
+net.ipv4.tcp_keepalive_intvl=30
+net.ipv4.tcp_keepalive_probes=5
+EOF
+  sysctl --system >/dev/null
+  ok "TCP keepalives applied"
+}
+
+apply_tmp_tmpfs() {
+  info "Configuring /tmp as tmpfs via systemd tmp.mount..."
+  read -rp "Enter size for /tmp (e.g., 2G, 4G) [default: 2G]: " TMP_SIZE
+  TMP_SIZE="${TMP_SIZE:-2G}"
+  mkdir -p /etc/systemd/system
+  cat > /etc/systemd/system/tmp.mount <<EOF
+[Unit]
+Description=Temporary Directory (/tmp)
+Documentation=man:hier(7)
+Before=local-fs.target
+
+[Mount]
+What=tmpfs
+Where=/tmp
+Type=tmpfs
+Options=mode=1777,strictatime,nosuid,nodev,size=${TMP_SIZE}
+
+[Install]
+WantedBy=local-fs.target
+EOF
+  systemctl daemon-reload
+  systemctl enable --now tmp.mount
+  ok "/tmp mounted as tmpfs (size=${TMP_SIZE})"
+}
+
+apply_journald_volatile() {
+  info "Configuring systemd-journald to use RAM (volatile storage)..."
+  mkdir -p /etc/systemd/journald.conf.d
+  cat > /etc/systemd/journald.conf.d/volatile.conf <<'EOF'
+[Journal]
+Storage=volatile
+RuntimeMaxUse=256M
+RuntimeKeepFree=64M
+# Feel free to adjust the above caps to your environment.
+EOF
+  systemctl restart systemd-journald
+  ok "journald set to RAM (volatile). Logs won't persist across reboot."
+}
+
 # -------- Main --------
 
 main() {
@@ -446,7 +520,6 @@ main() {
 
   if confirm "Apply sysctl profile settings?"; then apply_sysctl; else info "Sysctl: skipped"; fi
   if confirm "Apply ZFS ARC + prefetch tuning?"; then apply_zfs_arc_limits; else info "ZFS: skipped"; fi
-  if confirm "Apply safe NUMA sysctls (disable auto balancing, zone_reclaim=0)?"; then apply_numa_basics; else info "NUMA sysctls: skipped"; fi
   if confirm "Apply NIC coalescing and ring tuning (service)?"; then apply_nic_tuning; else info "NIC coalescing: skipped"; fi
   if confirm "Apply IO scheduler (udev) + CPU governor tuning?"; then apply_io_and_cpu_sched; else info "I/O + CPU: skipped"; fi
   if confirm "Disable Transparent Huge Pages (runtime + persistent service)?"; then apply_thp_runtime; else info "THP: skipped"; fi
@@ -454,8 +527,14 @@ main() {
   if confirm "Apply SSH hardening?"; then apply_ssh_hardening; else info "SSH hardening: skipped"; fi
   if confirm "Disable IPv6 via GRUB?"; then set_grub_ipv6_disable; else info "GRUB IPv6: skipped"; fi
 
+  # ---- New minimal-complexity extras ----
+  if confirm "Set CPU Energy-Performance Bias to performance (0) now and on boot?"; then apply_energy_perf_bias; else info "Energy-Perf-Bias: skipped"; fi
+  if confirm "Apply TCP keepalives (time=300s, intvl=30s, probes=5)?"; then apply_keepalives; else info "Keepalives: skipped"; fi
+  if confirm "Mount /tmp as tmpfs (RAM) via systemd?"; then apply_tmp_tmpfs; else info "/tmp tmpfs: skipped"; fi
+  if confirm "Make journald use RAM (volatile) with a 256M cap?"; then apply_journald_volatile; else info "journald RAM: skipped"; fi
+
   echo ""
-  ok "All selected changes applied. Reboot recommended."
+  ok "All selected changes applied. Reboot recommended for mount/grub/kernel settings."
 }
 
 main
