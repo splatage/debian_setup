@@ -165,6 +165,7 @@ systemctl restart mariadb
 # Interactive install
 curl -O https://raw.githubusercontent.com/splatage/debian_setup/refs/heads/main/perf-tune-hardening.sh
 bash perf-tune-hardening.sh
+```
 
 **What it configures (per script body):**
 - Writes defaults to `/etc/default/perf-tuning`
