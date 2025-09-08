@@ -222,8 +222,9 @@ EOF
 }
 
 apply_zfs_arc_limits() {
-  info "ZFS tuning wizard (ARC size optional + prefetch disable)"
-  mkdir -p /etc/modprobe.d
+  info "ZFS tuning wizard (ARC size optional + prefetch disable) — service-based only"
+
+  mkdir -p /etc/systemd/system
 
   echo "Choose ARC limit mode:"
   echo "  1) No ARC limits (only disable prefetch)"
@@ -234,24 +235,23 @@ apply_zfs_arc_limits() {
   while true; do
     read -rp "Select 1-4 [default 2]: " mode
     mode="${mode:-2}"
-    [[ "$mode" =~ ^[1-4]$ ]] && break
-    warn "Invalid selection. Enter 1, 2, 3, or 4."
+    [[ "$mode" =~ ^[1-4]$ ]] && break || warn "Invalid selection. Enter 1-4."
   done
 
-  # Defaults you used previously
+  # Previous defaults
   local MAX_GB=6
   local MIN_GB=2
+  local ARC_MAX_B="" ARC_MIN_B=""
+  local PREFETCH_DISABLE=1   # keep disabled for OLTP/random reads
 
   case "$mode" in
     1)
       info "ARC limits will NOT be set; only prefetch will be disabled."
-      unset ARC_MAX_B ARC_MIN_B
       ;;
     2)
       read -rp "ARC max (GiB) [default ${MAX_GB}]: " ans
       MAX_GB="${ans:-$MAX_GB}"
       ARC_MAX_B=$((MAX_GB*1024*1024*1024))
-      unset ARC_MIN_B
       info "Selected: ARC max only (${MAX_GB} GiB)"
       ;;
     3)
@@ -272,38 +272,67 @@ apply_zfs_arc_limits() {
       ;;
   esac
 
-  # Write module options
-  local conf="/etc/modprobe.d/zfs-tuning.conf"
-  {
-    echo "options zfs zfs_prefetch_disable=1"
-    if [ -n "${ARC_MAX_B:-}" ]; then
-      echo "options zfs zfs_arc_max=${ARC_MAX_B}"
-    fi
-    if [ -n "${ARC_MIN_B:-}" ]; then
-      echo "options zfs zfs_arc_min=${ARC_MIN_B}"
-    fi
-  } > "$conf"
-
-  ok "Wrote ${conf}"
-  update-initramfs -u
-  ok "Initramfs updated (reboot to apply module options)"
-
-  # Helpful summary
-  if [ -n "${ARC_MAX_B:-}" ]; then
-    info "ARC max set to $((ARC_MAX_B/1024/1024/1024)) GiB"
-  else
-    info "ARC max: not set (kernel default/auto)"
+  # Apply immediately (best effort)
+  if [ -w /sys/module/zfs/parameters/zfs_prefetch_disable ]; then
+    echo "$PREFETCH_DISABLE" > /sys/module/zfs/parameters/zfs_prefetch_disable 2>/dev/null || true
   fi
-  if [ -n "${ARC_MIN_B:-}" ]; then
-    info "ARC min set to $((ARC_MIN_B/1024/1024/1024)) GiB"
-  else
-    info "ARC min: not set (will float low)"
+  if [ -n "$ARC_MAX_B" ] && [ -w /sys/module/zfs/parameters/zfs_arc_max ]; then
+    echo "$ARC_MAX_B" > /sys/module/zfs/parameters/zfs_arc_max 2>/dev/null || true
+  fi
+  if [ -n "$ARC_MIN_B" ] && [ -w /sys/module/zfs/parameters/zfs_arc_min ]; then
+    echo "$ARC_MIN_B" > /sys/module/zfs/parameters/zfs_arc_min 2>/dev/null || true
+  fi
+  ok "Applied ARC/prefetch runtime values (immediate where possible)"
+
+  # Persist via oneshot service (runs after ZFS is initialized)
+  local svc="/etc/systemd/system/zfs-arc-tuning.service"
+  cat > "$svc" <<EOF
+[Unit]
+Description=ZFS ARC/runtime tuning (arc_min/max + prefetch)
+After=zfs-import.target
+Wants=zfs-import.target
+Before=zfs-mount.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -c '\
+  set -euo pipefail; \
+  # Wait up to 10s for ZFS module params to appear:
+  for i in {1..20}; do [ -e /sys/module/zfs/parameters/zfs_prefetch_disable ] && break; sleep 0.5; done; \
+  [ -w /sys/module/zfs/parameters/zfs_prefetch_disable ] && echo ${PREFETCH_DISABLE} > /sys/module/zfs/parameters/zfs_prefetch_disable || true; \
+  ${ARC_MAX_B:+[ -w /sys/module/zfs/parameters/zfs_arc_max ] && echo ${ARC_MAX_B} > /sys/module/zfs/parameters/zfs_arc_max || true; } \
+  ${ARC_MIN_B:+[ -w /sys/module/zfs/parameters/zfs_arc_min ] && echo ${ARC_MIN_B} > /sys/module/zfs/parameters/zfs_arc_min || true; } \
+  true'
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  systemctl daemon-reload
+  systemctl enable --now zfs-arc-tuning.service
+  ok "Installed zfs-arc-tuning.service (service-based persistence; no modprobe/initramfs)"
+
+  # Friendly reminder if old module-option file exists
+  if [ -f /etc/modprobe.d/zfs-tuning.conf ]; then
+    warn "/etc/modprobe.d/zfs-tuning.conf exists. Module options load at boot and may briefly differ until the service runs."
+    warn "If you want service-only behavior, consider removing ARC-related lines from that file."
   fi
 
-  info "Tip: you can also adjust at runtime (until reboot) via:"
-  info "  echo <bytes> > /sys/module/zfs/parameters/zfs_arc_max"
-  info "  echo <bytes> > /sys/module/zfs/parameters/zfs_arc_min"
+  # Summary
+  if [ -n "$ARC_MAX_B" ]; then
+    info "ARC max: $((ARC_MAX_B/1024/1024/1024)) GiB"
+  else
+    info "ARC max: not set"
+  fi
+  if [ -n "$ARC_MIN_B" ]; then
+    info "ARC min: $((ARC_MIN_B/1024/1024/1024)) GiB"
+  else
+    info "ARC min: not set"
+  fi
+  info "Prefetch disabled: ${PREFETCH_DISABLE}"
 }
+
 
 
 apply_nic_tuning() {
