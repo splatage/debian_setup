@@ -246,9 +246,7 @@ EOF
 
 
 apply_zfs_arc_limits() {
-  info "ZFS tuning wizard (ARC size optional + prefetch disable) — service-based only"
-
-  mkdir -p /etc/systemd/system
+  info "ZFS tuning wizard (ARC size optional + prefetch disable) — simple unit with static values"
 
   echo "Choose ARC limit mode:"
   echo "  1) No ARC limits (only disable prefetch)"
@@ -262,11 +260,9 @@ apply_zfs_arc_limits() {
     [[ "$mode" =~ ^[1-4]$ ]] && break || warn "Invalid selection. Enter 1-4."
   done
 
-  # Previous defaults
-  local MAX_GB=6
-  local MIN_GB=2
+  local MAX_GB=6 MIN_GB=2
   local ARC_MAX_B="" ARC_MIN_B=""
-  local PREFETCH_DISABLE=1   # keep disabled for OLTP/random reads
+  local PREFETCH_DISABLE=1
 
   case "$mode" in
     1)
@@ -296,10 +292,8 @@ apply_zfs_arc_limits() {
       ;;
   esac
 
-  # Apply immediately (best effort)
-  if [ -w /sys/module/zfs/parameters/zfs_prefetch_disable ]; then
-    echo "$PREFETCH_DISABLE" > /sys/module/zfs/parameters/zfs_prefetch_disable 2>/dev/null || true
-  fi
+  # Immediate (best effort) runtime apply
+  [ -w /sys/module/zfs/parameters/zfs_prefetch_disable ] && echo "$PREFETCH_DISABLE" > /sys/module/zfs/parameters/zfs_prefetch_disable 2>/dev/null || true
   if [ -n "$ARC_MAX_B" ] && [ -w /sys/module/zfs/parameters/zfs_arc_max ]; then
     echo "$ARC_MAX_B" > /sys/module/zfs/parameters/zfs_arc_max 2>/dev/null || true
   fi
@@ -308,9 +302,10 @@ apply_zfs_arc_limits() {
   fi
   ok "Applied ARC/prefetch runtime values (immediate where possible)"
 
-  # Persist via oneshot service (runs after ZFS is initialized)
+  # Build a minimal, static unit (no tricky quoting)
   local svc="/etc/systemd/system/zfs-arc-tuning.service"
-  cat > "$svc" <<EOF
+  {
+    cat <<'UNIT_HEAD'
 [Unit]
 Description=ZFS ARC/runtime tuning (arc_min/max + prefetch)
 After=zfs-import.target
@@ -319,41 +314,36 @@ Before=zfs-mount.service
 
 [Service]
 Type=oneshot
-ExecStart=/bin/bash -c '\
-  set -euo pipefail; \
-  # Wait up to 10s for ZFS module params to appear:
-  for i in {1..20}; do [ -e /sys/module/zfs/parameters/zfs_prefetch_disable ] && break; sleep 0.5; done; \
-  [ -w /sys/module/zfs/parameters/zfs_prefetch_disable ] && echo ${PREFETCH_DISABLE} > /sys/module/zfs/parameters/zfs_prefetch_disable || true; \
-  ${ARC_MAX_B:+[ -w /sys/module/zfs/parameters/zfs_arc_max ] && echo ${ARC_MAX_B} > /sys/module/zfs/parameters/zfs_arc_max || true; } \
-  ${ARC_MIN_B:+[ -w /sys/module/zfs/parameters/zfs_arc_min ] && echo ${ARC_MIN_B} > /sys/module/zfs/parameters/zfs_arc_min || true; } \
-  true'
+# Wait up to ~10s for ZFS parameters to appear
+ExecStart=/bin/sh -c 'i=0; while [ $i -lt 20 ] && [ ! -e /sys/module/zfs/parameters/zfs_prefetch_disable ]; do i=$((i+1)); sleep 0.5; done'
+UNIT_HEAD
+
+    # Prefetch toggle
+    echo "ExecStart=/bin/sh -c '[ -w /sys/module/zfs/parameters/zfs_prefetch_disable ] && printf %s ${PREFETCH_DISABLE} > /sys/module/zfs/parameters/zfs_prefetch_disable || true'"
+
+    # Optional ARC max/min lines (only emit if the value is set)
+    if [ -n "$ARC_MAX_B" ]; then
+      echo "ExecStart=/bin/sh -c '[ -w /sys/module/zfs/parameters/zfs_arc_max ] && printf %s ${ARC_MAX_B} > /sys/module/zfs/parameters/zfs_arc_max || true'"
+    fi
+    if [ -n "$ARC_MIN_B" ]; then
+      echo "ExecStart=/bin/sh -c '[ -w /sys/module/zfs/parameters/zfs_arc_min ] && printf %s ${ARC_MIN_B} > /sys/module/zfs/parameters/zfs_arc_min || true'"
+    fi
+
+    cat <<'UNIT_TAIL'
 RemainAfterExit=yes
 
 [Install]
 WantedBy=multi-user.target
-EOF
+UNIT_TAIL
+  } > "$svc"
 
   systemctl daemon-reload
   systemctl enable --now zfs-arc-tuning.service
-  ok "Installed zfs-arc-tuning.service (service-based persistence; no modprobe/initramfs)"
-
-  # Friendly reminder if old module-option file exists
-  if [ -f /etc/modprobe.d/zfs-tuning.conf ]; then
-    warn "/etc/modprobe.d/zfs-tuning.conf exists. Module options load at boot and may briefly differ until the service runs."
-    warn "If you want service-only behavior, consider removing ARC-related lines from that file."
-  fi
+  ok "Installed and started zfs-arc-tuning.service (simple static unit)"
 
   # Summary
-  if [ -n "$ARC_MAX_B" ]; then
-    info "ARC max: $((ARC_MAX_B/1024/1024/1024)) GiB"
-  else
-    info "ARC max: not set"
-  fi
-  if [ -n "$ARC_MIN_B" ]; then
-    info "ARC min: $((ARC_MIN_B/1024/1024/1024)) GiB"
-  else
-    info "ARC min: not set"
-  fi
+  [ -n "$ARC_MAX_B" ] && info "ARC max: $((ARC_MAX_B/1024/1024/1024)) GiB" || info "ARC max: not set"
+  [ -n "$ARC_MIN_B" ] && info "ARC min: $((ARC_MIN_B/1024/1024/1024)) GiB" || info "ARC min: not set"
   info "Prefetch disabled: ${PREFETCH_DISABLE}"
 }
 
