@@ -131,6 +131,7 @@ set_profile_datacenter_10g() {
 
 select_profile() {
   echo "Select a performance profile:"
+  PS3="Enter profile [1-4]: "
   select choice in "auto" "lan_low_latency" "wan_throughput" "datacenter_10g"; do
     case $choice in
       auto) set_profile_auto; break ;;
@@ -333,8 +334,6 @@ EOF
   info "Prefetch disabled: ${PREFETCH_DISABLE}"
 }
 
-
-
 apply_nic_tuning() {
   info "Configuring NIC coalescing (service-driven)..."
   mkdir -p /usr/local/sbin /etc/default
@@ -378,6 +377,8 @@ WantedBy=multi-user.target
 EOF
 
   /usr/local/sbin/tune-nic.sh
+  systemctl daemon-reload
+  systemctl enable --now tune-nic.service
   ok "NIC coalescing applied (and service installed)"
 }
 
@@ -389,6 +390,10 @@ apply_io_and_cpu_sched() {
   NVME_RA_KB=${NVME_RA_KB:-16}
   CPU_GOV=${CPU_GOV:-performance}
   info "Storage readahead: SSD=${SSD_RA_KB} KB, NVMe=${NVME_RA_KB} KB; CPU governor=${CPU_GOV}"
+
+  # Detect absolute ip path for udev RUN lines
+  local IP_BIN
+  IP_BIN="$(command -v ip || echo /usr/sbin/ip)"
 
   # Storage udev rules
   : > /etc/udev/rules.d/60-ssd-scheduler.rules
@@ -408,9 +413,9 @@ apply_io_and_cpu_sched() {
   : > /etc/udev/rules.d/99-nic-tuning.rules
   while IFS= read -r DEV; do
     DEVRANGE="$(echo "$DEV" | sed 's/[0-9]/[0-9]/g')"
-    echo "KERNEL==\"$DEVRANGE\", RUN+=\"/sbin/ip link set %k txqueuelen 256\"" >> /etc/udev/rules.d/99-nic-tuning.rules
+    echo "KERNEL==\"$DEVRANGE\", RUN+=\"${IP_BIN} link set %k txqueuelen 256\"" >> /etc/udev/rules.d/99-nic-tuning.rules
   done < <(ip -o link show | awk -F': ' '{print $2}' | grep -Ev '^(lo|docker|veth)')
-  echo 'KERNEL=="tun[0-9]*", RUN+="/sbin/ip link set %k txqueuelen 256"' >> /etc/udev/rules.d/99-nic-tuning.rules
+  echo "KERNEL==\"tun[0-9]*\", RUN+=\"${IP_BIN} link set %k txqueuelen 256\"" >> /etc/udev/rules.d/99-nic-tuning.rules
   echo '# KERNEL=="ppp[0-9]*", RUN+="/sbin/ip link set %k mtu 1492"' >> /etc/udev/rules.d/99-nic-tuning.rules
   ok "Wrote /etc/udev/rules.d/99-nic-tuning.rules"
 
@@ -507,13 +512,17 @@ EOF
 
 set_grub_ipv6_disable() {
   info "Ensuring ipv6.disable=1 in GRUB..."
-  if ! grep -q 'ipv6.disable=1' /etc/default/grub; then
-    sed -i 's/^\(GRUB_CMDLINE_LINUX="[^"]*\)"/\1 ipv6.disable=1"/' /etc/default/grub
-    update-grub
-    ok "GRUB updated to disable IPv6"
-  else
+  if grep -q 'ipv6.disable=1' /etc/default/grub; then
     ok "GRUB already disables IPv6"
+    return
   fi
+  if grep -q '^GRUB_CMDLINE_LINUX=' /etc/default/grub; then
+    sed -i 's/^\(GRUB_CMDLINE_LINUX="[^"]*\)"/\1 ipv6.disable=1"/' /etc/default/grub
+  else
+    echo 'GRUB_CMDLINE_LINUX="ipv6.disable=1"' >> /etc/default/grub
+  fi
+  update-grub
+  ok "GRUB updated to disable IPv6"
 }
 
 # -------- NEW: Minimal-complexity extras --------
@@ -608,6 +617,23 @@ EOF
   ok "journald set to RAM (volatile). Logs won't persist across reboot."
 }
 
+# -------- NUMA basics --------
+
+apply_numa_basics() {
+  info "Applying safe NUMA sysctls: kernel.numa_balancing=0, vm.zone_reclaim_mode=0 ..."
+  mkdir -p /etc/sysctl.d
+  cat > /etc/sysctl.d/97-numa.conf <<'EOF'
+# NUMA basics for DB/Redis/low-latency hosts
+kernel.numa_balancing=0
+vm.zone_reclaim_mode=0
+EOF
+  # Apply immediately (best effort)
+  sysctl -w kernel.numa_balancing=0 >/dev/null || true
+  sysctl -w vm.zone_reclaim_mode=0    >/dev/null || true
+  sysctl --system >/dev/null
+  ok "NUMA sysctls applied and persisted"
+}
+
 # -------- Main --------
 
 main() {
@@ -625,6 +651,7 @@ main() {
   if confirm "Apply NIC coalescing and ring tuning (service)?"; then apply_nic_tuning; else info "NIC coalescing: skipped"; fi
   if confirm "Apply IO scheduler (udev) + CPU governor tuning?"; then apply_io_and_cpu_sched; else info "I/O + CPU: skipped"; fi
   if confirm "Disable Transparent Huge Pages (runtime + persistent service)?"; then apply_thp_runtime; else info "THP: skipped"; fi
+  if confirm "Apply NUMA basics (disable auto balancing, zone_reclaim=0)?"; then apply_numa_basics; else info "NUMA basics: skipped"; fi
   if confirm "Apply ulimit increases?"; then apply_limits; else info "Limits: skipped"; fi
   if confirm "Apply SSH hardening?"; then apply_ssh_hardening; else info "SSH hardening: skipped"; fi
   if confirm "Disable IPv6 via GRUB?"; then set_grub_ipv6_disable; else info "GRUB IPv6: skipped"; fi
