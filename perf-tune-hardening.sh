@@ -498,6 +498,7 @@ RemainAfterExit=yes
 
 [Install]
 WantedBy=multi-user.target
+EOF
 
   systemctl daemon-reload
   systemctl enable --now thp-toggle.service || warn "thp-toggle.service failed to start"
@@ -719,7 +720,7 @@ RemainAfterExit=yes
 
 [Install]
 WantedBy=multi-user.target
-
+EOF
 
   systemctl daemon-reload
   systemctl enable --now ksm-numa-compat.service || warn "ksm-numa-compat.service failed to start"
