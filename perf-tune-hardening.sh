@@ -720,6 +720,7 @@ RemainAfterExit=yes
 
 [Install]
 WantedBy=multi-user.target
+
 EOF
 
   systemctl daemon-reload
@@ -780,7 +781,9 @@ RestartSec=5s
 
 [Install]
 WantedBy=multi-user.target
+
 EOF
+
     systemctl daemon-reload
     systemctl enable --now numad.service || warn "numad.service failed to start"
   fi
