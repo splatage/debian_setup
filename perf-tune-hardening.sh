@@ -418,6 +418,20 @@ set_grub_ipv6_disable() {
   fi
 }
 
+apply_numa_basics() {
+  info "Applying safe NUMA sysctls: kernel.numa_balancing=0, vm.zone_reclaim_mode=0 ..."
+  mkdir -p /etc/sysctl.d
+  cat > /etc/sysctl.d/97-numa.conf <<'EOF'
+# NUMA basics for DB/Redis/low-latency hosts
+kernel.numa_balancing=0
+vm.zone_reclaim_mode=0
+EOF
+  # Apply immediately
+  sysctl -w kernel.numa_balancing=0 >/dev/null || true
+  sysctl -w vm.zone_reclaim_mode=0    >/dev/null || true
+  sysctl --system >/dev/null
+  ok "NUMA sysctls applied and persisted"
+}
 # -------- Main --------
 
 main() {
@@ -432,6 +446,7 @@ main() {
 
   if confirm "Apply sysctl profile settings?"; then apply_sysctl; else info "Sysctl: skipped"; fi
   if confirm "Apply ZFS ARC + prefetch tuning?"; then apply_zfs_arc_limits; else info "ZFS: skipped"; fi
+  if confirm "Apply safe NUMA sysctls (disable auto balancing, zone_reclaim=0)?"; then apply_numa_basics; else info "NUMA sysctls: skipped"; fi
   if confirm "Apply NIC coalescing and ring tuning (service)?"; then apply_nic_tuning; else info "NIC coalescing: skipped"; fi
   if confirm "Apply IO scheduler (udev) + CPU governor tuning?"; then apply_io_and_cpu_sched; else info "I/O + CPU: skipped"; fi
   if confirm "Disable Transparent Huge Pages (runtime + persistent service)?"; then apply_thp_runtime; else info "THP: skipped"; fi
