@@ -492,15 +492,13 @@ Description=Disable Transparent Huge Pages (runtime)
 
 [Service]
 Type=oneshot
-ExecStart=/bin/bash -c '
-  [ -w /sys/kernel/mm/transparent_hugepage/enabled ] && echo never > /sys/kernel/mm/transparent_hugepage/enabled || true;
-  [ -w /sys/kernel/mm/transparent_hugepage/defrag ] && echo never > /sys/kernel/mm/transparent_hugepage/defrag || true;
-'
+ExecStart=/bin/sh -c '[ -w /sys/kernel/mm/transparent_hugepage/enabled ] && printf %s never > /sys/kernel/mm/transparent_hugepage/enabled || true'
+ExecStart=/bin/sh -c '[ -w /sys/kernel/mm/transparent_hugepage/defrag  ] && printf %s never > /sys/kernel/mm/transparent_hugepage/defrag  || true'
 RemainAfterExit=yes
 
 [Install]
 WantedBy=multi-user.target
-EOF
+
   systemctl daemon-reload
   systemctl enable --now thp-toggle.service || warn "thp-toggle.service failed to start"
   ok "THP disabled at runtime and persisted via systemd (no GRUB edit)"
@@ -706,27 +704,22 @@ EOF
 Description=Ensure KSM does not merge across NUMA nodes
 ConditionPathExists=/sys/kernel/mm/ksm
 After=multi-user.target
-# After=ksm.service ksmtuned.service  # uncomment if those units exist
+# If your distro ships ksm/ksmtuned units, you can optionally add:
+# After=ksm.service ksmtuned.service
 
 [Service]
 Type=oneshot
-ExecStart=/bin/bash -c '
-  set -euo pipefail
-  KSM_DIR=/sys/kernel/mm/ksm
-  [ -r "$KSM_DIR/run" ] || exit 0
-  for i in {1..10}; do [ -e "$KSM_DIR/run" ] && break; sleep 0.2; done
-  ksm_run=$(cat "$KSM_DIR/run" 2>/dev/null || echo 0)
-  if [ "$ksm_run" -gt 0 ]; then
-    [ -w "$KSM_DIR/merge_across_nodes" ] && echo 0 > "$KSM_DIR/merge_across_nodes" || true
-    [ -w "$KSM_DIR/merge_nodes" ]        && echo 0 > "$KSM_DIR/merge_nodes"        || true
-  fi
-  true
-'
+# If KSM isn't present/running, do nothing
+ExecStart=/bin/sh -c '[ -r /sys/kernel/mm/ksm/run ] || exit 0'
+ExecStart=/bin/sh -c 'r=$(cat /sys/kernel/mm/ksm/run 2>/dev/null || echo 0); [ "$r" -gt 0 ] || exit 0'
+# Disable cross-node merging (best effort)
+ExecStart=/bin/sh -c '[ -w /sys/kernel/mm/ksm/merge_across_nodes ] && printf %s 0 > /sys/kernel/mm/ksm/merge_across_nodes || true'
+ExecStart=/bin/sh -c '[ -w /sys/kernel/mm/ksm/merge_nodes        ] && printf %s 0 > /sys/kernel/mm/ksm/merge_nodes        || true'
 RemainAfterExit=yes
 
 [Install]
 WantedBy=multi-user.target
-EOF
+
 
   systemctl daemon-reload
   systemctl enable --now ksm-numa-compat.service || warn "ksm-numa-compat.service failed to start"
