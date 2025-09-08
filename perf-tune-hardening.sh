@@ -222,16 +222,89 @@ EOF
 }
 
 apply_zfs_arc_limits() {
-  info "Setting ZFS ARC options..."
+  info "ZFS tuning wizard (ARC size optional + prefetch disable)"
   mkdir -p /etc/modprobe.d
-  cat > /etc/modprobe.d/zfs-tuning.conf <<'EOF'
-options zfs zfs_arc_max=6442450944
-options zfs zfs_arc_min=2147483648
-options zfs zfs_prefetch_disable=1
-EOF
+
+  echo "Choose ARC limit mode:"
+  echo "  1) No ARC limits (only disable prefetch)"
+  echo "  2) Set ARC max only (recommended for OLTP/Redis)"
+  echo "  3) Set ARC min & max"
+  echo "  4) Pin ARC (min = max)  [advanced]"
+  local mode
+  while true; do
+    read -rp "Select 1-4 [default 2]: " mode
+    mode="${mode:-2}"
+    [[ "$mode" =~ ^[1-4]$ ]] && break
+    warn "Invalid selection. Enter 1, 2, 3, or 4."
+  done
+
+  # Defaults you used previously
+  local MAX_GB=6
+  local MIN_GB=2
+
+  case "$mode" in
+    1)
+      info "ARC limits will NOT be set; only prefetch will be disabled."
+      unset ARC_MAX_B ARC_MIN_B
+      ;;
+    2)
+      read -rp "ARC max (GiB) [default ${MAX_GB}]: " ans
+      MAX_GB="${ans:-$MAX_GB}"
+      ARC_MAX_B=$((MAX_GB*1024*1024*1024))
+      unset ARC_MIN_B
+      info "Selected: ARC max only (${MAX_GB} GiB)"
+      ;;
+    3)
+      read -rp "ARC max (GiB) [default ${MAX_GB}]: " ans
+      MAX_GB="${ans:-$MAX_GB}"
+      read -rp "ARC min (GiB) [default ${MIN_GB}]: " ans2
+      MIN_GB="${ans2:-$MIN_GB}"
+      ARC_MAX_B=$((MAX_GB*1024*1024*1024))
+      ARC_MIN_B=$((MIN_GB*1024*1024*1024))
+      info "Selected: ARC min=${MIN_GB} GiB, max=${MAX_GB} GiB"
+      ;;
+    4)
+      read -rp "Fixed ARC size (GiB) to pin (min=max) [default ${MAX_GB}]: " ans
+      MAX_GB="${ans:-$MAX_GB}"
+      ARC_MAX_B=$((MAX_GB*1024*1024*1024))
+      ARC_MIN_B=$ARC_MAX_B
+      warn "Pinning ARC at ${MAX_GB} GiB (min=max). Ensure memory headroom for MySQL/Redis!"
+      ;;
+  esac
+
+  # Write module options
+  local conf="/etc/modprobe.d/zfs-tuning.conf"
+  {
+    echo "options zfs zfs_prefetch_disable=1"
+    if [ -n "${ARC_MAX_B:-}" ]; then
+      echo "options zfs zfs_arc_max=${ARC_MAX_B}"
+    fi
+    if [ -n "${ARC_MIN_B:-}" ]; then
+      echo "options zfs zfs_arc_min=${ARC_MIN_B}"
+    fi
+  } > "$conf"
+
+  ok "Wrote ${conf}"
   update-initramfs -u
-  ok "ZFS tuning written (ARC + prefetch), initramfs updated"
+  ok "Initramfs updated (reboot to apply module options)"
+
+  # Helpful summary
+  if [ -n "${ARC_MAX_B:-}" ]; then
+    info "ARC max set to $((ARC_MAX_B/1024/1024/1024)) GiB"
+  else
+    info "ARC max: not set (kernel default/auto)"
+  fi
+  if [ -n "${ARC_MIN_B:-}" ]; then
+    info "ARC min set to $((ARC_MIN_B/1024/1024/1024)) GiB"
+  else
+    info "ARC min: not set (will float low)"
+  fi
+
+  info "Tip: you can also adjust at runtime (until reboot) via:"
+  info "  echo <bytes> > /sys/module/zfs/parameters/zfs_arc_max"
+  info "  echo <bytes> > /sys/module/zfs/parameters/zfs_arc_min"
 }
+
 
 apply_nic_tuning() {
   info "Configuring NIC coalescing (service-driven)..."
