@@ -617,8 +617,8 @@ EOF
 
 apply_tmp_tmpfs() {
   info "Configuring /tmp as tmpfs via systemd tmp.mount..."
-  read -rp "Enter size for /tmp (e.g., 2G, 4G) [default: 2G]: " TMP_SIZE
-  TMP_SIZE="${TMP_SIZE:-2G}"
+  read -rp "Enter size in G for /tmp (e.g., 2, 4) [default: 2]: " TMP_SIZE
+  TMP_SIZE="${TMP_SIZE:-2}"
   mkdir -p /etc/systemd/system
   cat > /etc/systemd/system/tmp.mount <<EOF
 [Unit]
@@ -630,7 +630,7 @@ Before=local-fs.target
 What=tmpfs
 Where=/tmp
 Type=tmpfs
-Options=mode=1777,strictatime,nosuid,nodev,size=${TMP_SIZE}
+Options=mode=1777,strictatime,nosuid,nodev,size=${TMP_SIZE}G
 
 [Install]
 WantedBy=local-fs.target
