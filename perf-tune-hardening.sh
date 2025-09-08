@@ -550,6 +550,78 @@ set_grub_ipv6_disable() {
 
 # -------- NEW: Minimal-complexity extras --------
 
+apply_numad_service() {
+  info "Checking NUMA topology and setting up numad (optional)..."
+
+  # Quick detection: require >1 NUMA node
+  local nodes_file="/sys/devices/system/node/online"
+  local node_count=1
+  if [ -r "$nodes_file" ]; then
+    # e.g., "0-1" or "0,1,2,3"
+    local spec; read -r spec < "$nodes_file"
+    # Expand ranges to count nodes
+    if [[ "$spec" =~ - ]]; then
+      local start=${spec%-*}; start=${start%,*}
+      local end=${spec#*-}; end=${end%,*}
+      node_count=$(( end - start + 1 ))
+    else
+      # count commas + 1
+      node_count=$(( $(echo "$spec" | awk -F',' '{print NF}') ))
+    fi
+  fi
+
+  if [ "$node_count" -le 1 ]; then
+    info "Only ${node_count} NUMA node detected; numad not useful here. Skipping."
+    return 0
+  fi
+  ok "Detected ${node_count} NUMA nodes — numad may help locality."
+
+  # Ensure package
+  if ! command -v numad >/dev/null 2>&1; then
+    read -rp "Install 'numad' package now? [y/N]: " a
+    if [[ "$a" =~ ^[Yy]$ ]]; then
+      apt-get update && apt-get install -y numad
+    else
+      warn "numad not installed; skipping."
+      return 0
+    fi
+  fi
+
+  # Sanity: cpuset controller presence (numad relies on cpusets)
+  if [ ! -d /sys/fs/cgroup/cpuset ] && ! mount | grep -q "cgroup2 on /sys/fs/cgroup"; then
+    warn "cpuset cgroup controller not found; numad may not operate. Continuing anyway."
+  fi
+
+  # Use distro-provided unit if present; otherwise create a minimal one
+  if systemctl list-unit-files | grep -q '^numad\.service'; then
+    systemctl enable --now numad.service
+  else
+    warn "numad.service not found; creating a simple unit."
+    cat > /etc/systemd/system/numad.service <<'EOF'
+[Unit]
+Description=NUMA daemon (numad)
+After=multi-user.target
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/numad
+Restart=always
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload
+    systemctl enable --now numad.service
+  fi
+
+  # Default behavior is fine; if you want to tweak scan interval later:
+  #   Edit ExecStart to: /usr/sbin/numad -i 5-30
+  # (defaults are ~5–15s per man page)
+  ok "numad enabled and started. Monitor with: journalctl -u numad -f"
+}
+
+
 disable_coredumps() {
   info "Disabling persistent coredumps (systemd-coredump)..."
   mkdir -p /etc/systemd/coredump.conf.d
@@ -701,6 +773,7 @@ main() {
   if confirm "Apply IO scheduler (udev) + CPU governor tuning?"; then apply_io_and_cpu_sched; else info "I/O + CPU: skipped"; fi
   if confirm "Disable Transparent Huge Pages (runtime + persistent service)?"; then apply_thp_runtime; else info "THP: skipped"; fi
   if confirm "Apply NUMA basics (disable auto balancing, zone_reclaim=0)?"; then apply_numa_basics; else info "NUMA basics: skipped"; fi
+  if confirm "Enable numad (automatic NUMA locality management) on multi-node hosts?"; then apply_numad_service; else info "numad: skipped"; fi
   if confirm "Apply ulimit increases?"; then apply_limits; else info "Limits: skipped"; fi
   if confirm "Apply SSH hardening?"; then apply_ssh_hardening; else info "SSH hardening: skipped"; fi
   if confirm "Apply network stack hardening sysctls?"; then apply_netstack_hardening; else info "Net hardening: skipped"; fi
