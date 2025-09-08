@@ -222,6 +222,29 @@ EOF
   ok "Sysctl applied"
 }
 
+apply_netstack_hardening() {
+  info "Applying network stack hardening sysctls..."
+  mkdir -p /etc/sysctl.d
+  cat > /etc/sysctl.d/94-net-hardening.conf <<'EOF'
+# Safer IPv4 defaults
+net.ipv4.conf.all.accept_source_route=0
+net.ipv4.conf.default.accept_source_route=0
+net.ipv4.conf.all.rp_filter=2
+net.ipv4.conf.default.rp_filter=2
+net.ipv4.icmp_echo_ignore_broadcasts=1
+net.ipv4.icmp_ignore_bogus_error_responses=1
+net.ipv4.tcp_syncookies=1
+net.ipv4.conf.all.log_martians=1
+net.ipv4.conf.default.log_martians=1
+# IPv6 is disabled elsewhere; keep RA off in case it’s re-enabled
+net.ipv6.conf.all.accept_ra=0
+net.ipv6.conf.default.accept_ra=0
+EOF
+  sysctl --system >/dev/null
+  ok "Network hardening sysctls applied"
+}
+
+
 apply_zfs_arc_limits() {
   info "ZFS tuning wizard (ARC size optional + prefetch disable) — service-based only"
 
@@ -527,6 +550,23 @@ set_grub_ipv6_disable() {
 
 # -------- NEW: Minimal-complexity extras --------
 
+disable_coredumps() {
+  info "Disabling persistent coredumps (systemd-coredump)..."
+  mkdir -p /etc/systemd/coredump.conf.d
+  cat > /etc/systemd/coredump.conf.d/disable.conf <<'EOF'
+[Coredump]
+Storage=none
+ProcessSizeMax=0
+EOF
+  mkdir -p /etc/sysctl.d
+  cat > /etc/sysctl.d/93-coredump.conf <<'EOF'
+fs.suid_dumpable=0
+EOF
+  sysctl --system >/dev/null
+  systemctl restart systemd-coredump 2>/dev/null || true
+  ok "Coredumps disabled (storage=none, suid_dumpable=0)"
+}
+
 apply_energy_perf_bias() {
   info "Setting Energy-Performance Bias to 'performance' (0) across CPUs..."
   local count=0
@@ -617,6 +657,15 @@ EOF
   ok "journald set to RAM (volatile). Logs won't persist across reboot."
 }
 
+ensure_irqbalance() {
+  info "Ensuring irqbalance is installed and enabled..."
+  if ! command -v irqbalance >/dev/null 2>&1; then
+    apt-get update && apt-get install -y irqbalance
+  fi
+  systemctl enable --now irqbalance
+  systemctl is-active --quiet irqbalance && ok "irqbalance is active" || warn "irqbalance not active"
+}
+
 # -------- NUMA basics --------
 
 apply_numa_basics() {
@@ -654,7 +703,11 @@ main() {
   if confirm "Apply NUMA basics (disable auto balancing, zone_reclaim=0)?"; then apply_numa_basics; else info "NUMA basics: skipped"; fi
   if confirm "Apply ulimit increases?"; then apply_limits; else info "Limits: skipped"; fi
   if confirm "Apply SSH hardening?"; then apply_ssh_hardening; else info "SSH hardening: skipped"; fi
+  if confirm "Apply network stack hardening sysctls?"; then apply_netstack_hardening; else info "Net hardening: skipped"; fi
+  if confirm "Disable system coredumps (recommended for prod)?"; then disable_coredumps; else info "Coredumps: left enabled"; fi
   if confirm "Disable IPv6 via GRUB?"; then set_grub_ipv6_disable; else info "GRUB IPv6: skipped"; fi
+  if confirm "Ensure irqbalance is installed and enabled?"; then ensure_irqbalance; else info "irqbalance: skipped"; fi
+
 
   # ---- New minimal-complexity extras ----
   if confirm "Set CPU Energy-Performance Bias to performance (0) now and on boot?"; then apply_energy_perf_bias; else info "Energy-Perf-Bias: skipped"; fi
