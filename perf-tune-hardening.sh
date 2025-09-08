@@ -462,11 +462,12 @@ Description=Set CPU governor to ${CPU_GOV}
 
 [Service]
 Type=oneshot
-ExecStart=/bin/bash -c 'for g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do echo ${CPU_GOV} > "$g" 2>/dev/null || true; done'
+ExecStart=/bin/sh -c 'for g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do [ -w "$g" ] && printf %s ${CPU_GOV} > "$g" || true; done'
 RemainAfterExit=yes
 
 [Install]
 WantedBy=multi-user.target
+
 EOF
   systemctl daemon-reload
   systemctl enable --now cpu-governor.service || warn "cpu-governor.service failed to start"
@@ -590,18 +591,12 @@ Description=Set CPU energy_performance_bias to performance (0)
 
 [Service]
 Type=oneshot
-ExecStart=/bin/bash -c '
-count=0
-for f in /sys/devices/system/cpu/cpu*/power/energy_perf_bias; do
-  [ -e "$f" ] || continue
-  echo 0 > "$f" 2>/dev/null || true
-  count=$((count+1))
-done
-echo "Set energy_perf_bias=0 on $count CPU(s)"
-'
+# Best effort: set EPP/EPB to 0 on all CPUs that expose the knob
+ExecStart=/bin/sh -c 'for f in /sys/devices/system/cpu/cpu*/power/energy_perf_bias; do [ -e "$f" ] && printf %s 0 > "$f" || true; done'
 
 [Install]
 WantedBy=multi-user.target
+
 EOF
   systemctl daemon-reload
   systemctl enable --now energy-perf-bias.service 2>/dev/null || true
