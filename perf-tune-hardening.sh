@@ -550,78 +550,6 @@ set_grub_ipv6_disable() {
 
 # -------- NEW: Minimal-complexity extras --------
 
-apply_numad_service() {
-  info "Checking NUMA topology and setting up numad (optional)..."
-
-  # Quick detection: require >1 NUMA node
-  local nodes_file="/sys/devices/system/node/online"
-  local node_count=1
-  if [ -r "$nodes_file" ]; then
-    # e.g., "0-1" or "0,1,2,3"
-    local spec; read -r spec < "$nodes_file"
-    # Expand ranges to count nodes
-    if [[ "$spec" =~ - ]]; then
-      local start=${spec%-*}; start=${start%,*}
-      local end=${spec#*-}; end=${end%,*}
-      node_count=$(( end - start + 1 ))
-    else
-      # count commas + 1
-      node_count=$(( $(echo "$spec" | awk -F',' '{print NF}') ))
-    fi
-  fi
-
-  if [ "$node_count" -le 1 ]; then
-    info "Only ${node_count} NUMA node detected; numad not useful here. Skipping."
-    return 0
-  fi
-  ok "Detected ${node_count} NUMA nodes — numad may help locality."
-
-  # Ensure package
-  if ! command -v numad >/dev/null 2>&1; then
-    read -rp "Install 'numad' package now? [y/N]: " a
-    if [[ "$a" =~ ^[Yy]$ ]]; then
-      apt-get update && apt-get install -y numad
-    else
-      warn "numad not installed; skipping."
-      return 0
-    fi
-  fi
-
-  # Sanity: cpuset controller presence (numad relies on cpusets)
-  if [ ! -d /sys/fs/cgroup/cpuset ] && ! mount | grep -q "cgroup2 on /sys/fs/cgroup"; then
-    warn "cpuset cgroup controller not found; numad may not operate. Continuing anyway."
-  fi
-
-  # Use distro-provided unit if present; otherwise create a minimal one
-  if systemctl list-unit-files | grep -q '^numad\.service'; then
-    systemctl enable --now numad.service
-  else
-    warn "numad.service not found; creating a simple unit."
-    cat > /etc/systemd/system/numad.service <<'EOF'
-[Unit]
-Description=NUMA daemon (numad)
-After=multi-user.target
-
-[Service]
-Type=simple
-ExecStart=/usr/sbin/numad
-Restart=always
-RestartSec=5s
-
-[Install]
-WantedBy=multi-user.target
-EOF
-    systemctl daemon-reload
-    systemctl enable --now numad.service
-  fi
-
-  # Default behavior is fine; if you want to tweak scan interval later:
-  #   Edit ExecStart to: /usr/sbin/numad -i 5-30
-  # (defaults are ~5–15s per man page)
-  ok "numad enabled and started. Monitor with: journalctl -u numad -f"
-}
-
-
 disable_coredumps() {
   info "Disabling persistent coredumps (systemd-coredump)..."
   mkdir -p /etc/systemd/coredump.conf.d
@@ -741,18 +669,144 @@ ensure_irqbalance() {
 # -------- NUMA basics --------
 
 apply_numa_basics() {
-  info "Applying safe NUMA sysctls: kernel.numa_balancing=0, vm.zone_reclaim_mode=0 ..."
+  info "Applying safe NUMA sysctls and KSM precaution (no cross-node merging)..."
   mkdir -p /etc/sysctl.d
   cat > /etc/sysctl.d/97-numa.conf <<'EOF'
 # NUMA basics for DB/Redis/low-latency hosts
 kernel.numa_balancing=0
 vm.zone_reclaim_mode=0
 EOF
-  # Apply immediately (best effort)
+
+  # Apply sysctls now (best effort)
   sysctl -w kernel.numa_balancing=0 >/dev/null || true
   sysctl -w vm.zone_reclaim_mode=0    >/dev/null || true
   sysctl --system >/dev/null
-  ok "NUMA sysctls applied and persisted"
+
+  # ---- KSM precaution: if KSM is running, do not merge across NUMA nodes ----
+  local KSM_DIR="/sys/kernel/mm/ksm"
+  if [ -d "$KSM_DIR" ] && [ -r "$KSM_DIR/run" ]; then
+    local ksm_run; read -r ksm_run < "$KSM_DIR/run" || ksm_run=0
+    if [ "${ksm_run:-0}" -gt 0 ]; then
+      # Prefer modern knob; fall back to older name if present
+      if [ -w "$KSM_DIR/merge_across_nodes" ]; then
+        echo 0 > "$KSM_DIR/merge_across_nodes" 2>/dev/null || true
+      fi
+      if [ -w "$KSM_DIR/merge_nodes" ]; then
+        echo 0 > "$KSM_DIR/merge_nodes" 2>/dev/null || true
+      fi
+      ok "KSM is running: disabled cross-node merging"
+    else
+      info "KSM present but not running (run=${ksm_run}); no action needed"
+    fi
+  else
+    info "KSM sysfs not present; skipping KSM precaution"
+  fi
+
+  # Persist via oneshot service at boot
+  cat > /etc/systemd/system/ksm-numa-compat.service <<'EOF'
+[Unit]
+Description=Ensure KSM does not merge across NUMA nodes
+ConditionPathExists=/sys/kernel/mm/ksm
+After=multi-user.target
+# If your distro ships ksm/ksmtuned units, you can optionally add:
+# After=ksm.service ksmtuned.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -c '
+  set -euo pipefail
+  KSM_DIR=/sys/kernel/mm/ksm
+  [ -r "$KSM_DIR/run" ] || exit 0
+  # Wait briefly if something else is toggling KSM at boot
+  for i in {1..10}; do [ -e "$KSM_DIR/run" ] && break; sleep 0.2; done
+  ksm_run=$(cat "$KSM_DIR/run" 2>/dev/null || echo 0)
+  if [ "$ksm_run" -gt 0 ]; then
+    [ -w "$KSM_DIR/merge_across_nodes" ] && echo 0 > "$KSM_DIR/merge_across_nodes" || true
+    [ -w "$KSM_DIR/merge_nodes" ]        && echo 0 > "$KSM_DIR/merge_nodes"        || true
+  fi
+  true
+'
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  systemctl daemon-reload
+  systemctl enable --now ksm-numa-compat.service
+  ok "NUMA basics applied and KSM cross-node merging disabled (persisted)"
+}
+
+
+apply_numad_service() {
+  info "Checking NUMA topology and setting up numad (optional)..."
+
+  # Quick detection: require >1 NUMA node
+  local nodes_file="/sys/devices/system/node/online"
+  local node_count=1
+  if [ -r "$nodes_file" ]; then
+    # e.g., "0-1" or "0,1,2,3"
+    local spec; read -r spec < "$nodes_file"
+    # Expand ranges to count nodes
+    if [[ "$spec" =~ - ]]; then
+      local start=${spec%-*}; start=${start%,*}
+      local end=${spec#*-}; end=${end%,*}
+      node_count=$(( end - start + 1 ))
+    else
+      # count commas + 1
+      node_count=$(( $(echo "$spec" | awk -F',' '{print NF}') ))
+    fi
+  fi
+
+  if [ "$node_count" -le 1 ]; then
+    info "Only ${node_count} NUMA node detected; numad not useful here. Skipping."
+    return 0
+  fi
+  ok "Detected ${node_count} NUMA nodes — numad may help locality."
+
+  # Ensure package
+  if ! command -v numad >/dev/null 2>&1; then
+    read -rp "Install 'numad' package now? [y/N]: " a
+    if [[ "$a" =~ ^[Yy]$ ]]; then
+      apt-get update && apt-get install -y numad
+    else
+      warn "numad not installed; skipping."
+      return 0
+    fi
+  fi
+
+  # Sanity: cpuset controller presence (numad relies on cpusets)
+  if [ ! -d /sys/fs/cgroup/cpuset ] && ! mount | grep -q "cgroup2 on /sys/fs/cgroup"; then
+    warn "cpuset cgroup controller not found; numad may not operate. Continuing anyway."
+  fi
+
+  # Use distro-provided unit if present; otherwise create a minimal one
+  if systemctl list-unit-files | grep -q '^numad\.service'; then
+    systemctl enable --now numad.service
+  else
+    warn "numad.service not found; creating a simple unit."
+    cat > /etc/systemd/system/numad.service <<'EOF'
+[Unit]
+Description=NUMA daemon (numad)
+After=multi-user.target
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/numad
+Restart=always
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload
+    systemctl enable --now numad.service
+  fi
+
+  # Default behavior is fine; if you want to tweak scan interval later:
+  #   Edit ExecStart to: /usr/sbin/numad -i 5-30
+  # (defaults are ~5–15s per man page)
+  ok "numad enabled and started. Monitor with: journalctl -u numad -f"
 }
 
 # -------- Main --------
