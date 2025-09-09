@@ -232,7 +232,7 @@ bash pm2_service_install.sh
 **Purpose** To build a minimal, custom kernel
 **Run (as root) on the target machine:**
 ```bash
-curl -O https://raw.githubusercontent.com/splatage/debian_setup/refs/heads/main/kernel_tool.sh
+curl -O https://raw.githubusercontent.com/splatage/debian_setup/refs/heads/main/kernel-tool.sh
 bash kernel-tool.sh plan
 bash kernel-tool.sh fetch
 bash kernel-tool.sh config
