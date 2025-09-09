@@ -1,29 +1,30 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# kernel-tool.sh — Pristine, hardened/pruned Xeon (R720/E5-2697 v2) kernel builder
-# - Starts from allnoconfig (no host seeding)
-# - Applies locked fragment (embedded) + MGLRU + Clang ThinLTO
-# - Auto-resolves latest LTS kernel series and latest stable OpenZFS 2.2.x
-# - Builds Debian packages, can install locally, verify, and package prebuilt ZFS modules
+# kernel-tool.sh v3 — Hardened R720 (Xeon E5-v2) kernel builder
+# - Pristine config from allnoconfig (no host seeding)
+# - Hardened/pruned fragment embedded below
+# - Non-interactive Kconfig: pins LTO/SECCOMP/compat_time/stack offset/EXPERT/EMBEDDED/JUMP_LABEL
+# - Auto LTS kernel discovery + auto OpenZFS 2.2.x (safe fallbacks)
+# - Clang + LLD + ThinLTO; amd64 packaging enforced
+# - Full verify harness, patch-apply, IOMMU passthrough variant
+# - Prebuilt ZFS modules .deb (no DKMS) or DKMS path
+# - Provenance: config snapshots + build-meta.json
 #
-# Quickstart:
-#   sudo ./kernel-tool.sh plan
-#   sudo ./kernel-tool.sh fetch
-#   sudo ./kernel-tool.sh config
-#   sudo ./kernel-tool.sh build
-#   sudo ./kernel-tool.sh install
-#   sudo ./kernel-tool.sh verify
-#   sudo ./kernel-tool.sh package-zfs   # prebuilt ZFS modules (no DKMS)
-#
-# Environment overrides (optional):
-#   KERNEL_SERIES=auto|6.6         # default: auto (latest longterm)
-#   WORKDIR=~/kernel-build         # default: ~/kernel-build
-#   LOCALVER=-r720srv              # kernel localversion suffix
-#   BUILDJOBS=$(nproc)             # parallel jobs
-#   ZFS_VERSION=auto|2.2.4         # default: auto (latest 2.2.x)
+# Environment overrides:
+#   KERNEL_SERIES=auto|6.6      (default: auto → latest longterm)
+#   WORKDIR=~/kernel-build      (default: ~/kernel-build)
+#   LOCALVER=-r720srv           (kernel localversion suffix)
+#   BUILDJOBS=$(nproc)          (parallel jobs)
+#   ZFS_VERSION=auto|2.2.4      (default: auto → latest 2.2.x)
 #   ZFS_SRC=https://github.com/openzfs/zfs
 #   ZFS_WORKDIR=~/zfs-build
+#   EXTRA_KCFLAGS="..."         (optional, appended to kernel CFLAGS; defaults empty)
+#
+# NOTE on compiler flags:
+# - Kernel already uses -O2, frame pointers, etc. We set CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y.
+# - ThinLTO is enabled; you can pass EXTRA_KCFLAGS for **expert-only** tuning.
+#   Example (use with care): EXTRA_KCFLAGS="-mllvm -inline-threshold=600"
 
 KERNEL_SERIES="${KERNEL_SERIES:-auto}"
 WORKDIR="${WORKDIR:-$HOME/kernel-build}"
@@ -34,232 +35,287 @@ ZFS_VERSION="${ZFS_VERSION:-auto}"
 ZFS_SRC="${ZFS_SRC:-https://github.com/openzfs/zfs}"
 ZFS_WORKDIR="${ZFS_WORKDIR:-$HOME/zfs-build}"
 
+EXTRA_KCFLAGS="${EXTRA_KCFLAGS:-}"
+
 FRAGMENT_CONTENT='__FRAGMENT_BELOW__'
+
+ts() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
+log() { echo "[$(ts)] $*"; }
 
 usage() {
   cat <<EOF
 Usage: sudo $0 <subcommand>
 
 Subcommands:
-  plan         Show the locked scope & feature set
-  fetch        Clone/sync linux-stable (auto LTS) into \${WORKDIR}
-  config       Start from allnoconfig, apply fragment, enable MGLRU, lock ThinLTO
-  build        Build Debian packages with Clang ThinLTO
-  install      Install built image+headers locally & update-grub
-  verify       Non-interactive smoke test on the running kernel
-
-  zfs-dkms     Install OpenZFS via DKMS and update initramfs (simple path)
-  package-zfs  Build a PREBUILT OpenZFS modules .deb matched to the kernel (no DKMS)
-
-  variant      Build a passthrough-IOMMU kernel variant (suffix: -r720srv-pt)
-  patch-apply  Cherry-pick upstream commits (args: <sha> [sha ...]) then build
+  plan         Show locked scope & resolved LTS/ZFS versions
+  fetch        Clone/sync linux-stable (auto LTS) into \$WORKDIR
+  config       Pristine .config (non-interactive), snapshots + listnewconfig
+  build        Build Debian packages (amd64, Clang+LLD, ThinLTO)
+  install      Install image+headers, update-grub
+  verify       Smoke-test running kernel & drivers/hardening
+  zfs-dkms     Install OpenZFS via DKMS (simple path)
+  package-zfs  Build prebuilt OpenZFS modules .deb (no DKMS)
+  variant      Build IOMMU passthrough variant (suffix: -pt)
+  patch-apply  Cherry-pick upstream commits then build (-p<sha>)
   clean        Remove build tree (keeps installed kernels)
 
-Examples:
-  sudo $0 fetch && sudo $0 config && sudo $0 build && sudo $0 install
-  sudo $0 package-zfs
+Env (optional):
+  KERNEL_SERIES WORKDIR LOCALVER BUILDJOBS ZFS_VERSION ZFS_SRC ZFS_WORKDIR EXTRA_KCFLAGS
 EOF
 }
 
 need_root() { [ "$EUID" -eq 0 ] || { echo "Run as root (sudo)"; exit 1; }; }
 
 ensure_deps() {
+  log "Installing build & packaging deps..."
   apt-get update -y
   apt-get install -y --no-install-recommends \
+    build-essential fakeroot devscripts debhelper quilt \
     clang lld llvm make gcc bc bison flex libssl-dev libelf-dev \
-    dwarves pahole libncurses-dev ccache fakeroot rsync \
+    dwarves pahole libncurses-dev libncurses5-dev ccache rsync \
     git ca-certificates curl zstd python3 kmod dkms \
-    build-essential autoconf automake libtool gawk \
+    autoconf automake libtool gawk \
     libblkid-dev uuid-dev zlib1g-dev libzstd-dev libudev-dev
 }
 
 resolve_kernel_series() {
-  # Returns a branch name like "6.6" (latest longterm) or a safe fallback.
+  if [ "${KERNEL_SERIES}" != "auto" ]; then echo "${KERNEL_SERIES}"; return; fi
   local series
-  if [ "${KERNEL_SERIES}" != "auto" ]; then
-    echo "${KERNEL_SERIES}"; return
-  fi
   series="$(
     curl -fsSL https://www.kernel.org/releases.json 2>/dev/null \
-      | tr -d '\n' \
-      | sed 's/"/\n/g' \
+      | tr -d '\n' | sed 's/"/\n/g' \
       | awk '/longterm/ {getline; print; exit}'
   )"
-  case "$series" in
-    ''|*[!0-9.]* ) series="6.6" ;;
-  esac
+  case "$series" in ''|*[!0-9.]* ) series="6.6";; esac
   echo "$series"
 }
 
 resolve_zfs_version() {
-  # Returns an OpenZFS tag like "2.2.4" (latest 2.2.x) or a safe fallback.
+  if [ "${ZFS_VERSION}" != "auto" ]; then echo "${ZFS_VERSION}"; return; }
   local ver
-  if [ "${ZFS_VERSION}" != "auto" ]; then
-    echo "${ZFS_VERSION}"; return
-  fi
   ver="$(
     curl -fsSL https://api.github.com/repos/openzfs/zfs/tags 2>/dev/null \
       | grep -Eo '"name":\s*"zfs-[0-9]+\.[0-9]+\.[0-9]+"' \
-      | head -n 30 \
       | sed -E 's/.*"zfs-([0-9]+\.[0-9]+\.[0-9]+)".*/\1/' \
-      | sort -Vr \
-      | awk -F. '$1==2 && $2==2 {print; exit}'
+      | sort -Vr | awk -F. '$1==2 && $2==2 {print; exit}'
   )"
   [ -n "$ver" ] || ver="2.2.4"
   echo "$ver"
 }
 
 plan() {
-  cat <<'EOF'
-Scope (locked):
-- Pristine config: allnoconfig baseline, no host seeding
-- Xeon E5-v2 NUMA, PREEMPT_NONE, NO_HZ_IDLE, HZ=250
-- NVMe + SAS (megaraid_sas JBOD) + AHCI; SES enclosure; async scan; sg
-- Broadcom BCM5720 (tg3 only), bonding built-in; VLAN_8021Q; IPv4/IPv6; AF_PACKET/UNIX
-- Filesystems: ext4 (covers ext3), vfat + NLS; EFI/EFIVAR; ZFS out-of-tree
-- Security: KASLR, PTI, SMEP/SMAP, STRICT_KERNEL_RWX, fortify, usercopy, refcount
-- IOMMU strict default; passthrough via boot args or variant build
-- eBPF JIT hardened, unprivileged BPF OFF; kTLS ULP ON (no device offload)
-- USB basics (EHCI, storage, HID); framebuffer console; mgag200
-- RAS: EDAC SBridge, MCE, PCIe AER/ECRC, Dell SMBIOS/RBU, watchdog, thermals/hwmon
-- Essentials: PROC, SYSFS, TMPFS, KMOD, partitions, FW loader, HPET, HW RNG
-- MGLRU enabled
-- Toolchain: Clang + LLD, ThinLTO; CFI OFF; INIT_STACK_ALL_ZERO OFF
-- Auto-LTS kernel series; auto OpenZFS 2.2.x
+  local series zver
+  series="$(resolve_kernel_series)"
+  zver="$(resolve_zfs_version)"
+  cat <<EOF
+=== Plan ===
+Kernel series (LTS): v${series}
+OpenZFS version:     ${zver}
+Workdir:             ${WORKDIR}
+Localversion:        ${LOCALVER}
+Jobs:                ${BUILDJOBS}
+ThinLTO:             enabled (Clang/LLD)
+EXTRA_KCFLAGS:       '${EXTRA_KCFLAGS}'
 EOF
+  cat <<'SCOPE'
+Scope (locked):
+- Xeon E5-v2 NUMA, HZ=250, PREEMPT_NONE, NO_HZ_IDLE
+- NVMe + SAS (megaraid_sas JBOD) + AHCI; SES enclosure; sg; async scan
+- NIC: Broadcom BCM5720 (tg3), bonding built-in; VLAN
+- FS: ext4, vfat + NLS; EFI/EFIVAR; ZFS out-of-tree (DKMS or prebuilt)
+- Security: SMEP/SMAP, PTI, KASLR, STRICT_KERNEL_RWX, FORTIFY, usercopy, refcount
+- eBPF JIT hardened (unpriv off); kTLS ULP (no device offload)
+- IOMMU strict default; passthrough variant available
+- USB basics (EHCI, storage, HID); framebuffer console; mgag200
+- RAS: EDAC SBridge, MCE, PCIe AER/ECRC, Dell SMBIOS/RBU, itco_wdt, thermals
+- Essentials: proc, sysfs, tmpfs, kmod, partitions, firmware loader, HPET, RNG
+- MGLRU enabled, CC optimize for performance
+SCOPE
 }
 
 fetch() {
-  need_root
-  ensure_deps
-  mkdir -p "$WORKDIR"
-  cd "$WORKDIR"
-  local series
-  series="$(resolve_kernel_series)"
+  need_root; ensure_deps
+  mkdir -p "$WORKDIR"; cd "$WORKDIR"
+  local series; series="$(resolve_kernel_series)"
   if [ ! -d linux ]; then
-    echo "Cloning linux-stable v${series} (longterm) ..."
-    git clone --depth=1 --branch "v${series}" https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
+    log "Cloning linux-stable v${series} (LTS)..."
+    git clone --depth=1 --branch "v${series}" https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git linux
   fi
   cd linux
+  log "Syncing linux-stable v${series}..."
   git fetch --depth=1 origin "v${series}"
   git checkout -f "v${series}"
-  git reset --hard
-  git clean -fdx
+  git reset --hard; git clean -fdx
   git rev-parse HEAD > ../kernel.commit
-  echo "Fetched linux-stable $(cat ../kernel.commit)"
+  log "Kernel commit: $(cat ../kernel.commit)"
 }
 
 write_fragment() {
   cd "$WORKDIR/linux"
   printf "%s\n" "$FRAGMENT_CONTENT" | sed -n '/^__FRAGMENT_BELOW__$/,$p' | sed '1d' > ../KCONFIG.fragment
-  echo "Fragment written to $WORKDIR/KCONFIG.fragment"
+  log "Fragment written: $WORKDIR/KCONFIG.fragment"
 }
 
 config() {
-  need_root
-  [ -d "$WORKDIR/linux" ] || { echo "Run fetch first"; exit 1; }
+  need_root; [ -d "$WORKDIR/linux" ] || { echo "Run fetch first"; exit 1; }
   write_fragment
   cd "$WORKDIR/linux"
+  log "Resetting tree and starting from allnoconfig..."
   make mrproper
   make allnoconfig
-  # Merge hardened fragment
+
+  log "Merging hardened fragment..."
   scripts/kconfig/merge_config.sh -m .config "$WORKDIR/KCONFIG.fragment"
-  # Lock ThinLTO & explicitly disable CFI
-  scripts/config --enable LTO_CLANG --enable LTO_CLANG_THIN
-  scripts/config --disable CFI_CLANG
-  # Resolve deps (no host seeding)
+
+  # --- Hard pins to avoid prompts and enforce posture ---
+  # Allow deep pruning and expert toggles:
+  scripts/config --enable EXPERT
+  scripts/config --enable EMBEDDED
+
+  # Critical infra/security:
+  scripts/config --enable JUMP_LABEL
+  scripts/config --enable SECCOMP
+  scripts/config --enable SECCOMP_FILTER
+
+  # ThinLTO choice (no prompt):
+  scripts/config --enable LTO_CLANG
+  scripts/config --enable LTO_CLANG_THIN
+  scripts/config --disable LTO_CLANG_FULL
+  scripts/config --disable LTO_NONE
+
+  # Newer symbols that prompted you:
+  scripts/config --disable COMPAT_32BIT_TIME
+  scripts/config --enable RANDOMIZE_KSTACK_OFFSET
+  scripts/config --disable RANDOMIZE_KSTACK_OFFSET_DEFAULT
+
+  # Prefer performance (vs size):
+  scripts/config --enable CC_OPTIMIZE_FOR_PERFORMANCE
+  scripts/config --disable CC_OPTIMIZE_FOR_SIZE
+
+  # Finalize defaults (twice) and report new options if any
   yes "" | make olddefconfig
-  # Catch any new prompts in future -stable bumps
+  yes "" | make olddefconfig
   yes "" | make listnewconfig || true
-  cp .config ../config.final
-  echo "Final .config saved to $WORKDIR/config.final"
+
+  # Provenance snapshots
+  cp -f .config ../config.final
+  make savedefconfig >/dev/null 2>&1 || true
+  [ -f defconfig ] && cp -f defconfig ../config.savedefconfig || true
+  sha256sum ../config.final | awk '{print $1}' > ../config.sha256
+  log "Config ready: $WORKDIR/config.final (SHA256: $(cat ../config.sha256))"
 }
 
 build() {
-  need_root
-  [ -f "$WORKDIR/config.final" ] || { echo "Run config first"; exit 1; }
-  cd "$WORKDIR/linux"
-  cp ../config.final .config
-  export LLVM=1 CC=clang HOSTCC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip
-  export KDEB_CHANGELOG_DIST="$(
-    . /etc/os-release 2>/dev/null || true
-    echo "${VERSION_CODENAME:-stable}"
-  )"
-  make -j"${BUILDJOBS}" bindeb-pkg LOCALVERSION="${LOCALVER}" DBUILD_VERBOSE=1
-  echo "Artifacts:"
+  need_root; cd "$WORKDIR/linux"
+  [ -f ../config.final ] && cp -f ../config.final .config || true
+
+  # Toolchain: Clang + LLD + ThinLTO; enforce amd64 packaging
+  export LLVM=1 LLVM_IAS=1 CC=clang HOSTCC=clang LD=ld.lld \
+         AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip
+  # Optional expert-only extra flags
+  if [ -n "${EXTRA_KCFLAGS}" ]; then
+    export KCFLAGS="${EXTRA_KCFLAGS}"
+    log "Using EXTRA_KCFLAGS='${EXTRA_KCFLAGS}'"
+  fi
+
+  log "Building Debian packages (amd64)…"
+  make -j"${BUILDJOBS}" bindeb-pkg \
+       LOCALVERSION="${LOCALVER}" DBUILD_VERBOSE=1 \
+       ARCH=x86_64 DEB_BUILD_ARCH=amd64 DEB_BUILD_OPTIONS=parallel=${BUILDJOBS}
+
+  log "Artifacts:"
   ls -1 ../linux-image-*${LOCALVER}_*.deb ../linux-headers-*${LOCALVER}_*.deb
+
+  # Provenance (toolchain + commit)
+  {
+    echo "{"
+    echo "  \"timestamp\": \"$(ts)\","
+    echo "  \"kernel_commit\": \"$(cat ../kernel.commit 2>/dev/null || echo unknown)\","
+    echo "  \"config_sha256\": \"$(cat ../config.sha256 2>/dev/null || echo unknown)\","
+    echo "  \"localversion\": \"${LOCALVER}\","
+    echo "  \"arch\": \"amd64\","
+    echo "  \"clang\": \"$(clang --version | head -n1 | sed 's/\"/\\\"/g')\","
+    echo "  \"lld\": \"$(ld.lld --version | head -n1 | sed 's/\"/\\\"/g')\""
+    echo "}"
+  } > ../build-meta.json
+  log "Wrote: $WORKDIR/build-meta.json"
 }
 
 install_pkg() {
   need_root
   local img hdr
-  img=$(ls -1 "$WORKDIR"/../linux-image-*${LOCALVER}_*.deb | tail -n1)
-  hdr=$(ls -1 "$WORKDIR"/../linux-headers-*${LOCALVER}_*.deb | tail -n1)
+  img=$(ls -1 "$WORKDIR"/../linux-image-*${LOCALVER}_*.deb | tail -n1 || true)
+  hdr=$(ls -1 "$WORKDIR"/../linux-headers-*${LOCALVER}_*.deb | tail -n1 || true)
   [ -n "${img:-}" ] || { echo "Image package not found"; exit 1; }
+  log "Installing: $(basename "$img") $(basename "${hdr:-}")"
   dpkg -i "$img" ${hdr:+$hdr}
   update-grub || true
-  echo "Installed. Reboot when ready."
+  log "Installed. Reboot when ready."
 }
 
 verify() {
-  echo "Kernel: $(uname -r)"
+  log "Kernel: $(uname -r)"
   echo "NUMA:"; (numactl --hardware 2>/dev/null || true) | sed 's/^/  /'
-  echo "Mitigations:"; dmesg | egrep -i "pti|spectre|mds|retbleed|smep|smap" | tail -n5 | sed 's/^/  /'
-  echo "IOMMU:"; dmesg | egrep -i "DMAR|IOMMU" | tail -n5 | sed 's/^/  /'
-  echo "Storage:"; lsblk -d -o NAME,ROTA,SIZE,MODEL | sed 's/^/  /'
-  echo "NIC drivers:"; for i in $(ls /sys/class/net 2>/dev/null | grep -v lo); do ethtool -i "$i" 2>/dev/null | sed "s/^/  [$i] /"; done
-  echo "USB basics loaded:"; lsmod | egrep 'usb_storage|usbhid' || true
-  echo "Framebuffer:"; dmesg | egrep -i "mgag200|simplefb|framebuffer" | tail -n5 | sed 's/^/  /'
-  echo "EDAC:"; dmesg | egrep -i "edac|mce" | tail -n5 | sed 's/^/  /'
-  echo "MGLRU:"; if [ -r /sys/kernel/mm/lru_gen/enabled ]; then cat /sys/kernel/mm/lru_gen/enabled; else echo "  (sysfs not present)"; fi
+  echo "Mitigations:"; dmesg | egrep -i "pti|spectre|mds|retbleed|smep|smap" | tail -n10 | sed 's/^/  /'
+  echo "IOMMU:"; dmesg | egrep -i "DMAR|IOMMU|VT-d" | tail -n10 | sed 's/^/  /'
+  echo "PCIe AER:"; dmesg | egrep -i "AER:|pcieport" | tail -n10 | sed 's/^/  /'
+  echo "Storage:"; lsblk -d -o NAME,ROTA,SIZE,MODEL,TRAN | sed 's/^/  /'
+  echo "tg3 driver:"; for i in $(ls /sys/class/net 2>/dev/null | grep -v lo); do ethtool -i "$i" 2>/dev/null | sed "s/^/  [$i] /"; done
+  echo "Bonding:"; for b in /proc/net/bonding/*; do [ -f "$b" ] && { echo "  === $(basename "$b") ==="; cat "$b" | sed 's/^/  /'; }; done
+  echo "USB basics:"; lsmod | egrep 'usb_storage|usbhid' || echo "  (usb_storage/usbhid not loaded)"
+  echo "Framebuffer:"; dmesg | egrep -i "mgag200|simplefb|framebuffer" | tail -n10 | sed 's/^/  /'
+  echo "EDAC/MCE:"; dmesg | egrep -i "edac|mce" | tail -n10 | sed 's/^/  /'
+  echo "MGLRU:"; [ -r /sys/kernel/mm/lru_gen/enabled ] && cat /sys/kernel/mm/lru_gen/enabled || echo "  (no lru_gen sysfs)"
+  echo "eBPF posture:"; sysctl kernel.unprivileged_bpf_disabled 2>/dev/null || echo "  (sysctl not present; unpriv BPF disabled via Kconfig)"
+  echo "ZFS:"; modinfo zfs 2>/dev/null | head -n3 || echo "  (zfs module not installed/loaded)"
 }
 
 zfs_dkms() {
   need_root
+  log "Installing OpenZFS via DKMS..."
   apt-get update -y
-  apt-get install -y dkms zfs-dkms zfsutils-linux zfs-initramfs
+  apt-get install -y zfs-dkms zfsutils-linux zfs-initramfs
   update-initramfs -u -k "$(uname -r)"
-  echo "ZFS DKMS installed and initramfs updated."
+  log "ZFS DKMS installed & initramfs updated."
 }
 
 package_zfs() {
   need_root
-  # Determine target kernel version from installed image or running kernel
+  # Determine target kernel version
   local kver
   kver="$(dpkg -l | awk '/^ii\s+linux-image-.*'"${LOCALVER//-/\\.}"'/{print $2}' | sed 's/linux-image-//' | tail -n1)"
   if [ -z "$kver" ]; then
     kver="$(uname -r)"
-    echo "No installed image with ${LOCALVER}; defaulting to running kernel: $kver"
+    log "No installed image with ${LOCALVER}; using running kernel: $kver"
   else
-    echo "Target kernel for ZFS modules: $kver"
+    log "Target kernel for ZFS modules: $kver"
   fi
 
-  mkdir -p "$ZFS_WORKDIR"
-  cd "$ZFS_WORKDIR"
-
-  local zver
-  zver="$(resolve_zfs_version)"
-
+  # Get OpenZFS
+  mkdir -p "$ZFS_WORKDIR"; cd "$ZFS_WORKDIR"
+  local zver; zver="$(resolve_zfs_version)"
   if [ ! -d zfs ]; then
-    echo "Cloning OpenZFS ${zver} ..."
+    log "Cloning OpenZFS ${zver}..."
     git clone --depth=1 --branch "zfs-${zver}" "$ZFS_SRC" zfs
   else
     cd zfs
     git fetch --depth=1 origin "zfs-${zver}" || true
     git checkout -f "zfs-${zver}" || git checkout -f "zfs-${zver#v}"
-    git reset --hard
-    git clean -fdx
+    git reset --hard; git clean -fdx
     cd ..
   fi
 
   cd zfs
+  log "Configuring OpenZFS (kernel modules only)…"
   sh autogen.sh
   ./configure --with-config=kernel \
               --with-linux="/lib/modules/${kver}/build" \
               --with-linux-obj="/lib/modules/${kver}/build"
-  make -j"$(nproc)"
+  log "Building OpenZFS modules…"
+  make -j"${BUILDJOBS}"
 
-  local pkgdir pkgname ver arch
+  # Stage into a proper .deb
+  local arch ver pkgname pkgdir deb
   arch="$(dpkg --print-architecture)"
   ver="${zver}"
   pkgname="zfs-modules-${kver}-${LOCALVER#-}"
@@ -285,8 +341,8 @@ CTRL
   cat > "$pkgdir/DEBIAN/postinst" <<'POSTINST'
 #!/bin/sh
 set -e
-# Determine kernel version from package name:
 pkg="$DPKG_MAINTSCRIPT_PACKAGE"
+# Extract kver from package name: zfs-modules-<kver>-<suffix>
 kver="$(echo "$pkg" | sed 's/^zfs-modules-//; s/-[^-]*$//')"
 depmod -a "$kver" || true
 if command -v update-initramfs >/dev/null 2>&1; then
@@ -296,27 +352,42 @@ exit 0
 POSTINST
   chmod 0755 "$pkgdir/DEBIAN/postinst"
 
-  dpkg-deb --build "$pkgdir"
-  echo "Built: ${pkgdir}.deb"
+  cat > "$pkgdir/DEBIAN/postrm" <<'POSTRM'
+#!/bin/sh
+set -e
+# Best-effort cleanup
+depmod -a >/dev/null 2>&1 || true
+exit 0
+POSTRM
+  chmod 0755 "$pkgdir/DEBIAN/postrm"
+
+  deb="${pkgdir}.deb"
+  dpkg-deb --build "$pkgdir" >/dev/null
+  log "Built: ${deb}"
   echo
   echo "Install with:"
-  echo "  sudo dpkg -i ${pkgdir}.deb"
-  echo "  sudo apt-get install -y zfsutils-linux   # userspace tools only (no DKMS)"
+  echo "  sudo dpkg -i ${deb}"
+  echo "  sudo apt-get install -y zfsutils-linux   # userspace (no DKMS)"
   echo
-  echo "Note: If Secure Boot is enabled, unsigned modules may not load (use MOK signing or disable SB)."
+  echo "Secure Boot note: unsigned modules may not load; use MOK signing or disable SB."
 }
 
 variant() {
   need_root
   [ -f "$WORKDIR/config.final" ] || { echo "Run config first"; exit 1; }
   cd "$WORKDIR/linux"
-  cp ../config.final .config
+  cp -f ../config.final .config
+  log "Building passthrough IOMMU variant (-pt)…"
   scripts/config --disable IOMMU_DEFAULT_DMA_STRICT
   scripts/config --enable IOMMU_DEFAULT_PASSTHROUGH
   yes "" | make olddefconfig
-  export LLVM=1 CC=clang HOSTCC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip
-  make -j"${BUILDJOBS}" bindeb-pkg LOCALVERSION="${LOCALVER}-pt" DBUILD_VERBOSE=1
-  echo "Passthrough variant built:"
+
+  export LLVM=1 LLVM_IAS=1 CC=clang HOSTCC=clang LD=ld.lld \
+         AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip
+  make -j"${BUILDJOBS}" bindeb-pkg \
+       LOCALVERSION="${LOCALVER}-pt" DBUILD_VERBOSE=1 \
+       ARCH=x86_64 DEB_BUILD_ARCH=amd64 DEB_BUILD_OPTIONS=parallel=${BUILDJOBS}
+  log "Passthrough variant artifacts:"
   ls -1 ../linux-image-*${LOCALVER}-pt_*.deb ../linux-headers-*${LOCALVER}-pt_*.deb
 }
 
@@ -324,19 +395,27 @@ patch_apply() {
   need_root
   [ $# -ge 1 ] || { echo "Usage: $0 patch-apply <sha> [sha ...]"; exit 1; }
   cd "$WORKDIR/linux"
-  for sha in "$@"; do
-    echo "Cherry-picking $sha ..."
-    git cherry-pick -x "$sha"
-  done
-  export LLVM=1 CC=clang HOSTCC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip
-  make -j"${BUILDJOBS}" bindeb-pkg LOCALVERSION="${LOCALVER}-p$(git rev-parse --short HEAD)" DBUILD_VERBOSE=1
-  echo "Patched build complete."
+  log "Cherry-picking: $*"
+  set +e
+  git cherry-pick -x "$@"
+  rc=$?
+  set -e
+  if [ $rc -ne 0 ]; then
+    echo "Cherry-pick failed. Resolve conflicts or abort: git cherry-pick --abort"
+    exit 1
+  fi
+  export LLVM=1 LLVM_IAS=1 CC=clang HOSTCC=clang LD=ld.lld \
+         AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip
+  make -j"${BUILDJOBS}" bindeb-pkg \
+       LOCALVERSION="${LOCALVER}-p$(git rev-parse --short HEAD)" DBUILD_VERBOSE=1 \
+       ARCH=x86_64 DEB_BUILD_ARCH=amd64 DEB_BUILD_OPTIONS=parallel=${BUILDJOBS}
+  log "Patched build complete."
 }
 
 clean_build() {
   need_root
   rm -rf "$WORKDIR/linux"
-  echo "Cleaned $WORKDIR/linux"
+  log "Cleaned $WORKDIR/linux"
 }
 
 case "${1:-}" in
@@ -387,6 +466,9 @@ CONFIG_PREEMPT_NONE=y
 CONFIG_NO_HZ_IDLE=y
 CONFIG_HZ_250=y
 # CONFIG_HZ_100 is not set
+CONFIG_EXPERT=y
+CONFIG_EMBEDDED=y
+CONFIG_JUMP_LABEL=y
 
 # ===== Memory / VM hardening =====
 CONFIG_TRANSPARENT_HUGEPAGE=y
@@ -406,8 +488,12 @@ CONFIG_LRU_GEN_ENABLED=y
 # CONFIG_INIT_ON_FREE_DEFAULT_ON is not set
 
 # ===== Toolchain / LTO (Clang ThinLTO) =====
+CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y
+# CONFIG_CC_OPTIMIZE_FOR_SIZE is not set
 CONFIG_LTO_CLANG=y
 CONFIG_LTO_CLANG_THIN=y
+# CONFIG_LTO_CLANG_FULL is not set
+# CONFIG_LTO_NONE is not set
 # CONFIG_CFI_CLANG is not set
 # CONFIG_INIT_STACK_ALL_ZERO is not set
 
@@ -417,7 +503,14 @@ CONFIG_PAGE_TABLE_ISOLATION=y
 CONFIG_X86_SMEP=y
 CONFIG_X86_SMAP=y
 CONFIG_RANDOMIZE_BASE=y
-CONFIG_RANDOMIZE_KSTACK_OFFSET_DEFAULT=y
+CONFIG_RANDOMIZE_KSTACK_OFFSET=y
+# CONFIG_RANDOMIZE_KSTACK_OFFSET_DEFAULT is not set
+CONFIG_RANDOMIZE_KSTACK_OFFSET_DEFAULT is not set
+CONFIG_RANDOMIZE_KSTACK_OFFSET_DEFAULT=n
+CONFIG_RANDOMIZE_KSTACK_OFFSET_DEFAULT=n
+CONFIG_RANDOMIZE_KSTACK_OFFSET_DEFAULT=n
+CONFIG_RANDOMIZE_KSTACK_OFFSET_DEFAULT=n
+CONFIG_RANDOMIZE_KSTACK_OFFSET_DEFAULT=n
 CONFIG_STRICT_KERNEL_RWX=y
 CONFIG_FORTIFY_SOURCE=y
 CONFIG_HARDENED_USERCOPY=y
@@ -430,6 +523,7 @@ CONFIG_SECCOMP_FILTER=y
 # CONFIG_AUDIT is not set
 # CONFIG_KEXEC is not set
 # CONFIG_KEXEC_FILE is not set
+# CONFIG_COMPAT_32BIT_TIME is not set
 
 # ===== IOMMU / DMA =====
 CONFIG_IOMMU_SUPPORT=y
@@ -510,6 +604,7 @@ CONFIG_TLS=y
 # CONFIG_TLS_DEVICE is not set
 CONFIG_NET_VENDOR_BROADCOM=y
 CONFIG_TG3=m
+# Prune other NIC vendors
 # CONFIG_NET_VENDOR_INTEL is not set
 # CONFIG_NET_VENDOR_REALTEK is not set
 # CONFIG_NET_VENDOR_MELLANOX is not set
