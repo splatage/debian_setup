@@ -91,7 +91,10 @@ resolve_kernel_series() {
 }
 
 resolve_zfs_version() {
-  if [ "${ZFS_VERSION}" != "auto" ]; then echo "${ZFS_VERSION}"; return; }
+  if [ "${ZFS_VERSION}" != "auto" ]; then
+    echo "${ZFS_VERSION}"
+    return
+  fi
   local ver
   ver="$(
     curl -fsSL https://api.github.com/repos/openzfs/zfs/tags 2>/dev/null \
