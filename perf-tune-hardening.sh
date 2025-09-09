@@ -434,6 +434,12 @@ apply_io_and_cpu_sched() {
   echo "ACTION==\"add|change\", KERNEL==\"nvme[0-9]n[0-9]\", ATTR{bdi/read_ahead_kb}=\"${NVME_RA_KB}\"" >> /etc/udev/rules.d/60-ssd-scheduler.rules
   echo 'ACTION=="add|change", KERNEL=="nvme[0-9]n[0-9]", ATTR{queue/rq_affinity}="2"' >> /etc/udev/rules.d/60-ssd-scheduler.rules
   echo 'ACTION=="add|change", KERNEL=="nvme[0-9]n[0-9]", ATTR{queue/add_random}="0"' >> /etc/udev/rules.d/60-ssd-scheduler.rules
+
+ # Extra mq-deadline tuning for SATA SSDs (inspired by IBM OLTP guidance)
+  echo 'ACTION=="add|change", KERNEL=="sd[a-z]", ATTR{queue/rotational}=="0", ATTR{queue/iosched/front_merges}="0"'     >> /etc/udev/rules.d/60-ssd-scheduler.rules
+  echo 'ACTION=="add|change", KERNEL=="sd[a-z]", ATTR{queue/rotational}=="0", ATTR{queue/iosched/write_expire}="500"'   >> /etc/udev/rules.d/60-ssd-scheduler.rules
+  echo 'ACTION=="add|change", KERNEL=="sd[a-z]", ATTR{queue/rotational}=="0", ATTR{queue/iosched/writes_starved}="1"'   >> /etc/udev/rules.d/60-ssd-scheduler.rules
+
   ok "Wrote /etc/udev/rules.d/60-ssd-scheduler.rules"
 
   # NIC udev rules (txqueuelen only; no global MTU)
