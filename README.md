@@ -11,6 +11,9 @@
 - [4) Performance Tuning & Hardening (`perf-tune-hardening.sh`)](#4-performance-tuning--hardening-perf-tune-hardeningsh)
 - [5) Fan Control Service (`fan_temp_service.sh`)](#5-fan-control-service-fan_temp_servicesh)
 - [6) Prep node.js Environment (`prep_node_env.sh`)](#6-pre-node-env-prep_node_envsh)
+- [7) Install PM2 Backend API Service (`install_pm2`)](#7-install-pm2-backend-api-service-install_pm2)
+- [8) Install and Build Custom Kernel Image (`kernel`)](#8-install-and-build-custom-kernel-image-kernel)
+- 
 - [Operations & Maintenance](#operations--maintenance)
 - [Troubleshooting](#troubleshooting)
 - [Scope & Progress](#scope--progress)
@@ -215,12 +218,43 @@ bash prep_node_env.sh
 ```
 ---
 
-## 7) Install PM2 Backend API Service
+## 7) Install PM2 Backend API Service (`install_pm2`)
 **Purpose** Sets up the PM2 cluster manager as a service
 **Run (as root) on the target machine:**
 ```bash
 curl -O https://raw.githubusercontent.com/splatage/debian_setup/refs/heads/main/pm2_service_install.sh
 bash pm2_service_install.sh
+```
+
+---
+
+## 8) Install and Build Custom Kernel Image (`kernel`)
+**Purpose** To build a minimal, custom kernel
+**Run (as root) on the target machine:**
+```bash
+curl -O https://raw.githubusercontent.com/splatage/debian_setup/refs/heads/main/kernel_tool.sh
+bash kernel-tool.sh plan
+bash kernel-tool.sh fetch
+bash kernel-tool.sh config
+bash kernel-tool.sh build
+bash kernel-tool.sh install
+```
+
+**Optional: prebuilt ZFS (no DKMS)**
+```bash
+bash kernel-tool.sh package-zfs
+```
+
+**Optional: DKMS path instead of prebuilt**
+```bash
+bash kernel-tool.sh zfs-dkms
+```
+
+
+**Reboot into the new kernel, then:**
+
+```bash
+bash kernel-tool.sh verify
 ```
 
 ---
