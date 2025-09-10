@@ -314,6 +314,9 @@ deb http://deb.debian.org/debian bookworm-updates main contrib non-free-firmware
 deb-src http://deb.debian.org/debian bookworm-updates main contrib non-free-firmware
 EOF_SOURCES
 
+echo "Enable backports..."
+echo "deb http://deb.debian.org/debian bookworm-backports main contrib non-free-firmware" > /etc/apt/sources.list.d/debian-12-backports.list
+
 echo "Mounting virtual directories for chroot environment..."
 mount --make-private --rbind /dev  /mnt/dev
 mount --make-private --rbind /proc /mnt/proc
@@ -361,7 +364,7 @@ dpkg-reconfigure --frontend noninteractive keyboard-configuration
 dpkg-reconfigure --frontend noninteractive console-setup
 
 echo "Installing ZFS packages (dpkg-dev, linux-headers-amd64, linux-image-amd64) inside chroot..."
-apt install --yes dpkg-dev linux-headers-amd64 linux-image-amd64
+apt install --yes -t bookworm-backports dpkg-dev linux-headers-amd64 linux-image-amd64 
 
 echo "Installing zfs-initramfs inside chroot..."
 apt install --yes zfs-initramfs
