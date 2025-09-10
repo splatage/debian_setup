@@ -3,12 +3,15 @@
 echo "Enter hostname"
 read HOST_NAME
 
-echo "Updating aptcache"
+echo "Updating aptcache and bookworm-backports"
 sed -i  "/deb/s/main non-free-firmware/main contrib non-free-firmware/" /etc/apt/sources.list
+echo "deb http://deb.debian.org/debian bookworm-backports main contrib non-free-firmware" > /etc/apt/sources.list.d/debian-12-backports.list
+
 apt-get update
 
 echo "Installing core ZFS utils and debootstrap"
-apt install --yes debootstrap gdisk zfsutils-linux grub2
+apt install --yes debootstrap gdisk grub2
+apt install --yes -t bookworm-backports zfsutils-linux
 
 DISKS=$(lsblk -ndo NAME,SIZE,TYPE,MODEL | grep -v "loop" | grep -v "sr" | awk '{if ($3 == "disk") print $1}')
 
@@ -314,9 +317,6 @@ deb http://deb.debian.org/debian bookworm-updates main contrib non-free-firmware
 deb-src http://deb.debian.org/debian bookworm-updates main contrib non-free-firmware
 EOF_SOURCES
 
-echo "Enable backports..."
-echo "deb http://deb.debian.org/debian bookworm-backports main contrib non-free-firmware" > /etc/apt/sources.list.d/debian-12-backports.list
-
 echo "Mounting virtual directories for chroot environment..."
 mount --make-private --rbind /dev  /mnt/dev
 mount --make-private --rbind /proc /mnt/proc
@@ -340,6 +340,8 @@ ch_partpath() {
 }
 
 echo "Updating packages inside chroot..."
+echo "Enable backports..."
+echo "deb http://deb.debian.org/debian bookworm-backports main contrib non-free-firmware" > /etc/apt/sources.list.d/debian-12-backports.list
 apt update
 
 echo "Installing base packages (console-setup, locales) inside chroot..."
@@ -367,7 +369,7 @@ echo "Installing ZFS packages (dpkg-dev, linux-headers-amd64, linux-image-amd64)
 apt install --yes -t bookworm-backports dpkg-dev linux-headers-amd64 linux-image-amd64 
 
 echo "Installing zfs-initramfs inside chroot..."
-apt install --yes zfs-initramfs
+apt install --yes -t bookworm-backports zfs-initramfs
 
 echo "Configuring DKMS for ZFS inside chroot..."
 echo REMAKE_INITRD=yes > /etc/dkms/zfs.conf
@@ -376,7 +378,7 @@ echo "Installing GRUB packages (grub-pc or grub-efi-amd64/shim-signed) inside ch
 if [[ "$BOOT_CHOICE" == "1" ]]; then
     apt install --yes grub-pc
 elif [[ "$BOOT_CHOICE" == "2" ]]; then
-    apt install --yes dosfstools grub-efi-amd64 shim-signed
+    apt install --yes -t bookworm-backports dosfstools grub-efi-amd64 shim-signed
 fi
 
 echo "Setting root password. You will be prompted for the password twice."
