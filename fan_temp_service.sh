@@ -76,10 +76,11 @@ now() { date +'%Y-%m-%d %H:%M:%S'; }
 clamp_pct() { local p=$1; (( p<0 )) && p=0; (( p>100 )) && p=100; echo "$p"; }
 log() { echo "[$(now)] $*"; }
 run() {
-  # echo the ipmitool command; execute only if DO_WRITE=1
-  echo "+ $*"
+    # echo the ipmitool command; execute only if DO_WRITE=1
   if [[ "$DO_WRITE" = "1" ]]; then
     "$@"
+  else
+    echo "+ $*"
   fi
 }
 
