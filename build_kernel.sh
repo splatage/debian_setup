@@ -245,7 +245,7 @@ apt -t bookworm-backports install -y \
 apt -t bookworm-backports build-dep -y linux
 
 # Kernel source tarball
-apt -t bookworm-backports install -y linux-source
+apt -t bookworm-backports install -y inux-source-${VERSION}
 
 # Extract source
 tar -xvf /usr/src/linux-source-${VERSION}.tar.xz -C /usr/src/
