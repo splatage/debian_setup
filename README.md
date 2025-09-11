@@ -101,7 +101,7 @@ lsblk -f
 
 ---
 
-## 2) Network Bonding (`netwotk_bonding`)
+## 2) Network Bonding (`network_bonding`)
 **Purpose:** To configure networking, and network bonding
 
 Install required packages
