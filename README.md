@@ -98,6 +98,26 @@ zpool status
 zfs list
 lsblk -f
 ```
+## 1.A) Hardened Kernel
+**Purpose:** Recomplie the backports kernel for performance and security
+```bash
+curl -O https://raw.githubusercontent.com/splatage/debian_setup/refs/heads/main/build_kernel.sh
+bash build_kernel.sh
+```
+
+The resulting deb files will be in /usr/src:
+
+```bash
+dpkg -i ...deb
+update-grub
+```
+
+**Reboot to use the new kernel**
+Verify with
+
+```bash
+uname -a
+```
 
 ---
 
