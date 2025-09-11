@@ -8,13 +8,12 @@
 - [1) ZFS Root Installer (`debian_zfs_install.sh`)](#1-zfs-root-installer-debian_zfs_installsh)  
 - [2) Network Bonding (`network_bonding`)](#2-network-bonding-network_bonding)  
 - [3) MariaDB Cluster Controller (`mariadb_cluster_controller.sh`)](#3-mariadb-cluster-controller-mariadb_cluster_controllersh)  
-- [4) MariaDB Server Config (`mariadb.conf`)](#4-mariadb-server-config-mariadbconf)  
-- [5) Performance Tuning & Hardening (`perf-tune-hardening.sh`)](#5-performance-tuning--hardening-perf-tune-hardeningsh)  
-- [6) Fan Control Service (`fan_temp_service.sh`)](#6-fan-control-service-fan_temp_servicesh)  
-- [7) User Management (`users`)](#7-user-management-users)  
-- [8) Prep Node.js Environment (`prep_node_env.sh`)](#8-prep-nodejs-environment-prep_node_envsh)  
-- [9) Install PM2 Backend API Service (`install_pm2`)](#9-install-pm2-backend-api-service-install_pm2)  
-- [10) Build Custom Kernel Image (`kernel`)](#10-build-custom-kernel-image-kernel)  
+- [4) Performance Tuning & Hardening (`perf-tune-hardening.sh`)](#4-performance-tuning--hardening-perf-tune-hardeningsh)  
+- [5) Fan Control Service (`fan_temp_service.sh`)](#5-fan-control-service-fan_temp_servicesh)  
+- [6) User Management (`enforce-ssh-keys.sh` + `users.keys`)](#6-user-management-enforce-ssh-keyssh--userskeys)  
+- [7) Prep Node.js Environment (`prep_node_env.sh`)](#7-prep-nodejs-environment-prep_node_envsh)  
+- [8) Install PM2 Backend API Service (`pm2_service_install.sh`)](#8-install-pm2-backend-api-service-pm2_service_installsh)  
+- [9) Build Custom Kernel Image (`build_kernel.sh`)](#9-build-custom-kernel-image-build_kernelsh)  
 - [Operations & Maintenance](#operations--maintenance)  
 - [Troubleshooting](#troubleshooting)  
 - [Scope & Progress](#scope--progress)  
@@ -33,14 +32,17 @@ This repository contains a focused toolchain to provision and operate Debian ser
 ## Repository Layout
 ```
 /debian_setup-main/
-├─ README.md                              # Legacy readme (superseded by this guide)
-├─ debian_zfs_install.sh                  # ZFS-root Debian installer
-├─ mariadb_cluster_controller.sh          # MariaDB primary/replica controller (SSH-based)
-├─ mariadb.conf                           # MariaDB server config master (embedded in script)
-├─ perf-tune-hardening.sh                 # System performance tuning & SSH hardening
-├─ fan_temp_service.sh                    # Installs fan_control.sh + systemd service
+├─ README.md
+├─ debian_zfs_install.sh
+├─ mariadb_cluster_controller.sh
+├─ perf-tune-hardening.sh
+├─ fan_temp_service.sh
+├─ enforce-ssh-keys.sh
+├─ users.keys
+├─ prep_node_env.sh
+├─ pm2_service_install.sh
+└─ build_kernel.sh
 ```
-
 
 ---
 
@@ -58,13 +60,25 @@ This repository contains a focused toolchain to provision and operate Debian ser
 0. (Optional) Apply performance tuning after base OS install.  
 1. Provision OS with **ZFS root**: run `debian_zfs_install.sh` locally (destructive).  
 2. Tune system with **perf-tune-hardening.sh**.  
-3. Install **MariaDB** on DB hosts; copy `mariadb.conf`, then run `mariadb_cluster_controller.sh`.  
+3. Install **MariaDB** on DB hosts, then run `mariadb_cluster_controller.sh`.  
 4. Install **fan control service** where supported.  
-5. Set up **users**, **Node.js environment**, **PM2**, and optionally build a **custom kernel**.  
+5. Set up **user keys**, **Node.js environment**, **PM2**, and optionally build a **custom kernel**.  
 
 ---
 
 ## 1) ZFS Root Installer (`debian_zfs_install.sh`)
+
+### Details
+- **Flow:** prompts for hostname → enables backports → installs `debootstrap`, `gdisk`, `grub2`, and `zfsutils-linux` (from backports) → interactive disk selection via `lsblk` → partitions with `sgdisk` (EFI or BIOS), creates **bpool** (/boot) and **rpool** (root) → creates ZFS pools with `ashift=12`, `autotrim=on`, compression `lz4`, `xattr=sa`, etc. → debootstrap into `/mnt` → chroot stage completes base config, GRUB, and users.
+- **Encryption:** when selected, `rpool` is created with `-O encryption=on -O keylocation=prompt -O keyformat=passphrase` (interactive).
+- **Datasets & mounts:** creates `bpool/BOOT/debian` and `rpool/ROOT/debian` (sets `canmount` appropriately) and mounts them for GRUB/initramfs steps.
+- **Chroot stage highlights:** enables backports inside chroot; installs base packages (`console-setup`, `locales`), sets locale (adds `en_NZ.UTF-8`), configures SSH (`PermitRootLogin yes` in this bootstrap context), and sets GRUB `root=ZFS=rpool/ROOT/debian`.
+- **GRUB & EFI:** supports BIOS or UEFI partitioning; verifies `grub-probe /boot` for ZFS.
+- **Cleanup:** unmounts bind-mounts and ZFS, exports pools before exit.
+- **Destructive action:** selected disks are **wiped** (`dd` and `sgdisk -Z`). Ensure backups.
+
+**Writes/Touches:** `/etc/apt/sources.list*`, `/etc/apt/sources.list.d/debian-12-backports.list`, ZFS pools `bpool`, `rpool`, `/mnt` chroot tree, `/etc/default/grub` (inside chroot).
+
 **Purpose:** Interactive, destructive installer that prepares ZFS root and completes Debian base setup.
 
 **Boot into a Debian live installer. Run on the target machine (as root):**
@@ -86,7 +100,7 @@ curl -O https://raw.githubusercontent.com/splatage/debian_setup/refs/heads/main/
 bash debian_zfs_install.sh 
 ```
 
-**What it does (observed from script):**
+**What it does:**
 - Updates apt sources and installs: `debootstrap`, `gdisk`, `zfsutils-linux`, `grub2`.
 - Detects disks via `lsblk`; offers selection menu.
 - Partitions selected disks, creates EFI partition, creates ZFS pools and datasets for root/boot.
@@ -97,7 +111,7 @@ bash debian_zfs_install.sh
 - **Destructive:** Will repartition selected disks. Have backups.
 - **UEFI/EFI partitioning:** Script provisions EFI partition and installs GRUB accordingly.
 - If disk auto-detection fails, script attempts an alternate `lsblk` path.
-- If you encounter shutdown hangs with EFI unmount: ensure EFI mount is not busy; check for open files and `systemd` mount units. (See Troubleshooting.)
+- If you encounter shutdown hangs with EFI unmount: ensure EFI mount is not busy; check for open files and `systemd` mount units.
 
 **Post-install sanity:**
 ```bash
@@ -109,7 +123,13 @@ lsblk -f
 ---
 
 ## 2) Network Bonding (`network_bonding`)
-**Purpose:** To configure networking and network bonding.
+
+### Details
+- This section is a **manual recipe** (no script in the repo). It installs **ifenslave** and shows an `/etc/network/interfaces` example for `bond0` in **balance-alb** mode with slaves `eno1..eno4`.
+- Adjust interface names (`eno*`) to match your hardware (`ip a` / `ls /sys/class/net`).
+- The example also shows a basic `/etc/resolv.conf`. Replace placeholders (`[ip]`, `<dns_server>`) with your environment.
+
+**Purpose:** Configure networking and network bonding.
 
 Install required packages:
 ```bash
@@ -172,6 +192,19 @@ nameserver <dns_server>
 ---
 
 ## 3) MariaDB Cluster Controller (`mariadb_cluster_controller.sh`)
+
+### Details
+- **Topology:** one **Primary** + N **Replicas**, coordinated from a controller host via SSH (default `SSH_USER=root`). IPs are defined at the top of the script (`PRIMARY_IP`, `REPLICA_IP_LIST`).
+- **Config templating:** The controller **generates** `/etc/mysql/mariadb.conf.d/50-server.cnf` on each node using an inline template with placeholders for role, `server-id`, and `bind-address`. Primary and Replica blocks are selectively uncommented.
+- **ZFS layout on DB nodes:** The script creates (or re-creates) a pool `${ZFS_POOL_NAME}` on `${ZFS_DEVICE}` and mounts it at `${MARIADB_BASE_DIR}` (defaults: device `/dev/nvme0n1`, pool `mariadb_data`, base dir `/var/lib/mysql`). Datasets for `data` and `log` are created with sensible options (`recordsize=16k`, `compression=lz4`, `atime=off`, `logbias=throughput`). ⚠️ If a pool of that name already exists, it may be **destroyed and recreated** to ensure a clean state.
+- **Packages:** installs `mariadb-server` and `mariadb-backup` (MariaDB 11.4 via `mariadb_repo_setup`).
+- **Seeding & GTID:** takes a prepared backup on Primary with `mariabackup`, streams it over **ssh→ssh** tar pipe to each replica, applies `CHANGE MASTER TO ...`, and starts replication with **GTID**. Reads `mariadb_backup_binlog_info` to capture GTID.
+- **Promotion:** includes a promotion flow: catch-up replicas, set old primary read-only and locked, `RESET MASTER` on promoted replica, then repoint others. Script echoes when to repoint clients.
+- **Health/Status:** prints summary per node (role, threads, max connections, Seconds_Behind_Master, GTID positions).
+- **Replication user:** `REPL_USER` is defined in the script; password is prompted at runtime.
+
+**Writes/Touches (remote nodes):** `/etc/mysql/mariadb.conf.d/50-server.cnf`, ZFS pool `${ZFS_POOL_NAME}` at `${MARIADB_BASE_DIR}`, systemd `mariadb` service state during configure/seed.
+
 **Purpose:** Orchestrates a primary with one or more replicas via SSH from a controller. Uses streaming backup/restore and replication reconfiguration.
 
 **Run from a controller host that has key-based root SSH to all DB nodes:**
@@ -181,8 +214,8 @@ bash mariadb_cluster_controller.sh
 ```
 
 **Capabilities:**
-- Provisions primary and replicas remotely via SSH as `root` (expects `mariadb` CLI on hosts).
-- Streams a backup from primary directly into each replica via an SSH-to-SSH pipe (avoids controller disk temp usage).
+- Provisions primary and replicas remotely via SSH as `root`.
+- Streams a backup from primary directly into each replica via an SSH-to-SSH pipe.
 - Configures replication (GTID mode enabled).
 - Supports promotion and re-pointing replicas after failover.
 
@@ -204,28 +237,22 @@ bash mariadb_cluster_controller.sh
 
 ---
 
-## 4) MariaDB Server Config (`mariadb.conf`) 
-**Purpose:** Baseline MariaDB tuning including GTID replication and InnoDB parameters. Adjust sizes to your RAM and workload.
+## 4) Performance Tuning & Hardening (`perf-tune-hardening.sh`)
 
-**Install on each MariaDB host:**
-```bash
-install -m 0644 mariadb.conf /etc/mysql/mariadb.conf.d/50-server.cnf
-systemctl restart mariadb
-```
+### Details
+- **Interactive & idempotent:** asks for confirmation before each change; writes config under `/etc/` and installs simple services/units where needed.
+- **Profiles:** `auto` (BBR + `fq`), `lan_low_latency`, `wan_throughput`, `datacenter_10g` — selecting congestion control and `qdisc`, and setting additive sysctls per profile.
+- **Base sysctls:** writes `/etc/sysctl.d/99-perf-base.conf` and profile file `/etc/sysctl.d/98-perf-profile.conf`; reloads them explicitly.
+- **NIC coalescing & rings:** optional `ethtool -C/-G` tuning via a small service; profiles control RX/TX coalescing and ring sizes when supported.
+- **I/O scheduler & CPU governor:** optional udev rule for scheduler and a `cpu-governor.service` to set the desired governor.
+- **Transparent Huge Pages:** runtime disable + a `thp-toggle.service` to persist across reboots.
+- **NUMA basics & numad:** disables auto-balancing, sets safe sysctls, optional `numad` enablement.
+- **ZFS awareness:** optional ARC/prefetch tuning helpers (paths-only; applies only if ZFS present).
+- **Limits & hardening:** raises `nofile` via `/etc/security/limits.d`, optional SSH hardening (ciphers/MACs), kernel/network hardening sysctls, optional IPv6 disable via GRUB.
+- **Other toggles:** irqbalance ensure/start; TCP keepalives; `/tmp` as tmpfs; journald volatile (RAM).
 
-**Highlights:**
-- `gtid_strict_mode=ON`, `binlog_format=ROW`, `binlog_row_image=FULL`
-- `innodb_flush_log_at_trx_commit=2`, `sync_binlog=0`
-- Large `innodb_log_file_size` (4G), `innodb_buffer_pool_size=16G`
-- Other InnoDB tunables: `innodb_io_capacity`, `innodb_lru_scan_depth`
+**Writes/Touches:** `/etc/default/perf-tuning`, `/etc/sysctl.d/98-perf-profile.conf`, `/etc/sysctl.d/99-perf-base.conf`, `/etc/systemd/system/*` (cpu-governor, thp-toggle, nic tuning), `/etc/udev/rules.d/*`, `/etc/security/limits.d/*`.
 
-**Adjustments:**
-- `innodb_buffer_pool_size` to 50–70% of RAM.
-- Consider durability knobs for crash-safety vs speed.
-
----
-
-## 5) Performance Tuning & Hardening (`perf-tune-hardening.sh`)
 **Purpose:** Applies performance tuning and optional SSH hardening.
 
 **Usage:**
@@ -247,7 +274,18 @@ bash perf-tune-hardening.sh --uninstall
 
 ---
 
-## 6) Fan Control Service (`fan_temp_service.sh`)
+## 5) Fan Control Service (`fan_temp_service.sh`)
+
+### Details
+- **What it installs:** `/usr/local/sbin/fan_control.sh`, `/etc/default/fan-control`, and a systemd unit `fan-control.service`.
+- **Sensors:** reads the **hottest** CPU package temperature from `/sys/class/hwmon/*` with `coretemp` (no `sensors` dependency).
+- **Vendors:** `VENDOR=ibm` or `VENDOR=dell` (set in `/etc/default/fan-control`). IBM path writes per-bank using `ipmitool raw`; Dell switches to manual then sets global %. No auto-detect.
+- **Control loop:** single-instance lock; computes desired duty using `BASELINE_C`, `DEADBAND_C`, `UP_GAIN`, `DOWN_GAIN`; clamps to `[MIN_PCT, MAX_PCT]`; interval via `INTERVAL` seconds.
+- **Config keys (defaults file):** `INTERVAL`, `BASELINE_C`, `DEADBAND_C`, `UP_GAIN`, `DOWN_GAIN`, `MIN_PCT`, `MAX_PCT`, `VENDOR`, plus IBM-specific `IBM_BANKS` and `IBM_CODEMAP`.
+- **Logs:** `journalctl -u fan-control -e` will show per-iteration temps and applied %.
+
+**Writes/Touches:** `/usr/local/sbin/fan_control.sh`, `/etc/default/fan-control`, `/etc/systemd/system/fan-control.service`.
+
 **Purpose:** Installs a fan control script and systemd service.
 
 **Run on the target machine:**
@@ -269,28 +307,66 @@ journalctl -u fan-control -e
 
 ---
 
-## 7) User Management (`users`)
-**Purpose:** To provision and enforce user key access.
+## 6) User Management (`enforce-ssh-keys.sh` + `users.keys`)
 
+### Details
+- **Source of truth:** downloads `users.keys` from the repo URL (INI-like). Sections are `[default]` and user-specific sections (e.g., `[minecraft]`). Keys under `[default]` apply to **all** users.
+- **Key types accepted:** validated by regex, supports `ssh-ed25519`, `ssh-rsa`, `ecdsa`, `sk-*`, etc.
+- **Behavior:** creates Linux user if missing; ensures `~/.ssh` (700) and `authorized_keys` (600); **compares** current keys vs expected and only updates on drift (prints added/removed lines with provenance).
+- **Idempotent:** re-running with the same `users.keys` makes no changes (“✓ Keys already up to date”).
+
+**Key file example:** the repo’s `users.keys` includes `[default]` and named users; only `[minecraft]` currently has an explicit ed25519 key.
+
+**Purpose:** Enforces user SSH key access using a script and a central key file.
+
+**Run:**
 ```bash
 curl -O https://raw.githubusercontent.com/splatage/debian_setup/refs/heads/main/enforce-ssh-keys.sh
 bash enforce-ssh-keys.sh
 ```
 
+**Key file format (`users.keys`):**
+```
+[default]
+ssh-rsa AAAAB3Nza... user@example
+```
+
+- The `[default]` section applies to all users unless overridden.  
+- Place one or more public keys under each section.  
+- The script provisions `authorized_keys` on the system according to this file.
+
 ---
 
-## 8) Prep Node.js Environment (`prep_node_env.sh`)
-**Purpose:** Installs the Node.js environment in preparation for project deployment.
+## 7) Prep Node.js Environment (`prep_node_env.sh`)
+
+### Details
+- **Flags:** `--user <name>` (required), `--node <version>` (default `lts/*`), `--quiet`, `--help`.
+- **What it does:** installs **NVM** for the target user (latest installer URL), appends a guarded profile snippet to `~/.bashrc` (marker: `<<< node-env: nvm loader >>>`), installs Node.js version requested, sets it as default, and installs `pm2` globally for that user.
+- **Dependencies:** ensures `curl` (installs via `apt-get` if missing). Runs all NVM/Node steps as the target user.
+- **Verification:** prints `node -v`, `npm -v`, `pm2 -v` at the end (non-fatal).
+
+**No app deploy:** this script **does not** clone your repo or register services; it only prepares the toolchain for a given user.
+
+**Purpose:** Installs the Node.js environment for project deployment.
 
 **Run:**
 ```bash
 curl -O https://raw.githubusercontent.com/splatage/debian_setup/refs/heads/main/prep_node_env.sh
-bash prep_node_env.sh --user tradebid
+bash prep_node_env.sh
 ```
 
 ---
 
-## 9) Install PM2 Backend API Service (`install_pm2`)
+## 8) Install PM2 Backend API Service (`pm2_service_install.sh`)
+
+### Details
+- **Purpose:** writes a **skeleton** systemd unit `tradebidder-backend.service` for a PM2-managed Node.js app in `/home/tradebid/tradebidder/backend`.
+- **Placeholders:** the unit content in the script contains an ellipsis (`...`). You must add the appropriate `ExecStart`/`ExecStop` lines for PM2 (e.g., `pm2 start ecosystem.config.cjs --update-env` and `pm2 resurrect`) before enabling.
+- **Environment:** hard-codes Node path to `~/.nvm/versions/node/v22.19.0/bin`, sets `NODE_ENV=production` and `PM2_HOME=/home/tradebid/.pm2`.
+- **Order:** wants `network-online.target`, `redis-server.service`, and `mariadb.service|mysql.service`.
+
+**After editing the unit:** run `systemctl daemon-reload && systemctl enable --now tradebidder-backend.service` and inspect logs with `journalctl -u tradebidder-backend.service -f`.
+
 **Purpose:** Sets up PM2 cluster manager as a service.
 
 **Run:**
@@ -301,7 +377,14 @@ bash pm2_service_install.sh
 
 ---
 
-## 10) Build Custom Kernel Image (`kernel`)
+## 9) Build Custom Kernel Image (`build_kernel.sh`)
+
+### Details
+- **Kernel version marker:** `VERSION=6.12` (used for expectations; the script assumes kernel sources are available).
+- **Config baseline:** writes `/usr/src/answers.cfg` with an explicit Kconfig profile emphasizing: `PREEMPT_NONE`, NUMA + sched SMT/MC, security hardening (PTI/SMEP/SMAP/KASLR/STACKPROTECTOR_STRONG/STRICT_KERNEL_RWX/etc.), IOMMU (INTEL), PCIe AER/ECRC, THP (`madvise`/HugeTLB), allocator hardening (freelist random/shuffle), LRU_GEN, NVMe/SCSI/AHCI, net stack with BPF JIT always-on/unpriv off, and EFI/EXT4.
+- **Build steps:** disables debug info, ensures modules are on, runs `make olddefconfig KCONFIG_ALLCONFIG=/usr/src/answers.cfg`, then builds Debian packages via `bindeb-pkg` with a local version tag (`+tb`) and a time-based package version (`1~tbYYYYMMDD-HHMM`).
+- **Artifacts:** resulting `*.deb` packages are produced in the kernel build tree (typical for `bindeb-pkg`).
+
 **Purpose:** Recompile the backports kernel for performance/security hardening.
 
 ```bash
