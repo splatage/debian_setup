@@ -101,6 +101,67 @@ lsblk -f
 
 ---
 
+## 2) Network Bonding (`netwotk_bonding`)
+**Purpose:** To configure networking, and network bonding
+
+Install required packages
+```bash
+apt-get install ifenslave
+```
+
+ifdown eth0 (Repeat for all interfaces included in the bond)
+```bash
+/etc/init.d/networking stop
+```
+
+Modify /etc/network/interfaces
+```# / /etc/network/interfaces
+source /etc/network/interfaces.d/*
+
+# Loopback
+auto lo
+iface lo inet loopback
+
+# ===== Bond interface =====
+auto bond0
+iface bond0 inet static
+    address [ip]
+    netmask 255.255.255.0
+    gateway 192.168.1.1
+    mtu 1472
+    bond-mode balance-alb
+    bond-miimon 100
+    bond-xmit-hash-policy layer3+4
+    bond-slaves eno1 eno2 eno3 eno4
+
+# ===== Physical slaves (no IP config) =====
+allow-hotplug eno1
+iface eno1 inet manual
+    bond-master bond0
+
+allow-hotplug eno2
+iface eno2 inet manual
+    bond-master bond0
+
+allow-hotplug eno3
+iface eno3 inet manual
+    bond-master bond0
+
+allow-hotplug eno4
+iface eno4 inet manual
+    bond-master bond0
+```
+
+**Edit /etc/resolv.conf**
+```# /etc/resolv.conf
+domain local.domain
+search local.domain
+nameserver <dns_srver>
+nameserver <dns_server>
+```
+
+---
+
 ## 2) MariaDB Cluster Controller (`mariadb_cluster_controller.sh`)
 **Purpose:** Orchestrates a primary with one or more replicas via SSH from a controller/bastion. Uses streaming backup/restore and replication reconfiguration.
 
