@@ -288,5 +288,6 @@ echo "# Building kernel with version tag ${LOCALTAG}, package version ~tb${CUSTO
 make -j"$(nproc)" \
   LOCALVERSION="${LOCALTAG}" \
   KDEB_PKGVERSION="1~tb${CUSTOM_DATE}" \
+  skipdbg=skipdbg \
   bindeb-pkg
 
