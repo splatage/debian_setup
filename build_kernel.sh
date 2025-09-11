@@ -247,30 +247,21 @@ apt -t bookworm-backports build-dep -y linux
 # Kernel source tarball
 apt -t bookworm-backports install -y linux-source
 
-echo "# Extract source..."
+# Extract source
 tar -xvf /usr/src/linux-source-${VERSION}.tar.xz -C /usr/src/
-
-echo "# Create config..."
 cd /usr/src/linux-source-${VERSION}
 cp -v /boot/config-$(uname -r) .config
 
-echo "# Apply policy..."
-make olddefconfig KCONFIG_ALLCONFIG=/usr/src/answers.cfg
-
-echo "# Capture loaded modules..."
-lsmod > /usr/src/lsmod_$(uname -r)
-
-echo "# Prune to locally loaded modules..."
+# 1. Prune to loaded modules
 yes "" | make LSMOD=/usr/src/lsmod_$(uname -r) localmodconfig
 
-echo "# Generic switches..."
+# 2. Disable debug info
 scripts/config --disable DEBUG_INFO
 scripts/config --enable MODULES
 
-echo "# Re-apply policy guarantees..."
+# 3. Apply strict policy baseline
 make olddefconfig KCONFIG_ALLCONFIG=/usr/src/answers.cfg
 
-
-echo "# Building..."
-skipdbg=skipdbg skipmodules=skipmodules make -j$(nproc) bindeb-pkg
+# 4. Build
+make -j$(nproc) bindeb-pkg
 
