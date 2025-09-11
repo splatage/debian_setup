@@ -11,13 +11,19 @@ declare -a default_keys=()
 declare -A user_keys
 current_user=""
 
-# --- Stream + Parse INI ---
-curl -fsSL "$USERS_URL" | while IFS= read -r line; do
+# --- Stream + Parse INI (no subshell issue) ---
+while IFS= read -r line; do
   [[ -z "$line" || "$line" =~ ^# ]] && continue
 
   if [[ "$line" =~ ^\[.*\]$ ]]; then
     current_user="${line#[}"
     current_user="${current_user%]}"
+
+    if [[ "$current_user" != "default" ]]; then
+      # Ensure user is registered even if no keys
+      : "${user_keys[$current_user]:=}"
+    fi
+
   else
     if [[ ! "$line" =~ $VALID_KEY_REGEX ]]; then
       echo "!! Invalid SSH key format detected in $USERS_URL"
@@ -25,12 +31,14 @@ curl -fsSL "$USERS_URL" | while IFS= read -r line; do
     fi
 
     if [[ "$current_user" == "default" ]]; then
-      default_keys+=("$line")
+      # Tag default keys
+      default_keys+=("DEFAULT:$line")
     else
-      user_keys["$current_user"]+="$line"$'\n'
+      # Tag user-specific keys
+      user_keys["$current_user"]+="USER:$line"$'\n'
     fi
   fi
-done
+done < <(curl -fsSL "$USERS_URL")
 
 # --- Provision users ---
 for user in "${!user_keys[@]}"; do
@@ -48,15 +56,25 @@ for user in "${!user_keys[@]}"; do
   chmod 700 "$sshdir"
   chown -R "$user:$user" "$sshdir"
 
-  # Build expected key list
+  # Build expected key list with tags
   expected_keys=("${default_keys[@]}")
   while IFS= read -r key; do
     [[ -z "$key" ]] && continue
     expected_keys+=("$key")
   done <<< "${user_keys[$user]}"
 
-  # De-dupe + sort in memory
-  IFS=$'\n' read -r -d '' -a sorted_expected < <(printf "%s\n" "${expected_keys[@]}" | sort -u && printf '\0')
+  # Strip tags when writing, but keep map for logging
+  declare -A key_sources=()
+  clean_expected=()
+  for tagged in "${expected_keys[@]}"; do
+    src="${tagged%%:*}"
+    key="${tagged#*:}"
+    clean_expected+=("$key")
+    key_sources["$key"]="$src"
+  done
+
+  # De-dupe + sort
+  IFS=$'\n' read -r -d '' -a sorted_expected < <(printf "%s\n" "${clean_expected[@]}" | sort -u && printf '\0')
 
   # Read current keys (if any)
   if [[ -f "$authfile" ]]; then
@@ -73,7 +91,10 @@ for user in "${!user_keys[@]}"; do
     echo "      - Removed:"
     comm -23 <(printf "%s\n" "${sorted_current[@]}") <(printf "%s\n" "${sorted_expected[@]}") | sed 's/^/        /'
     echo "      + Added:"
-    comm -13 <(printf "%s\n" "${sorted_current[@]}") <(printf "%s\n" "${sorted_expected[@]}") | sed 's/^/        /'
+    while IFS= read -r newkey; do
+      src="${key_sources[$newkey]:-UNKNOWN}"
+      echo "        [$src] $newkey"
+    done < <(comm -13 <(printf "%s\n" "${sorted_current[@]}") <(printf "%s\n" "${sorted_expected[@]}"))
 
     # Enforce new keys
     printf "%s\n" "${sorted_expected[@]}" > "$authfile"
