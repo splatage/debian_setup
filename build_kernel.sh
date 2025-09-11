@@ -270,7 +270,7 @@ cd /usr/src/linux-source-${VERSION}
 cp -v /boot/config-$(uname -r) .config
 
 # 1. Prune to loaded modules
-yes "" | make LSMOD=/usr/src/lsmod_$(uname -r) localmodconfig
+# yes "" | make LSMOD=/usr/src/lsmod_$(uname -r) localmodconfig
 
 # 2. Disable debug info
 scripts/config --disable DEBUG_INFO
