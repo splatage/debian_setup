@@ -12,7 +12,7 @@
 - [5) Fan Control Service (`fan_temp_service.sh`)](#5-fan-control-service-fan_temp_servicesh)  
 - [6) User Management (`enforce-ssh-keys.sh` + `users.keys`)](#6-user-management-enforce-ssh-keyssh--userskeys)  
 - [7) Prep Node.js Environment (`prep_node_env.sh`)](#7-prep-nodejs-environment-prep_node_envsh)  
-- [8) Install PM2 Backend API Service (`pm2_service_install.sh`)](#8-install-pm2-backend-api-service-pm2_service_installsh)  
+- [8) Install PM2 Backend API Service (`pm2_service_install.sh`)](#8-install-pm2-backend-api-service-pm2_service)  
 - [9) Build Custom Kernel Image (`build_kernel.sh`)](#9-build-custom-kernel-image-build_kernelsh)  
 - [Operations & Maintenance](#operations--maintenance)  
 - [Troubleshooting](#troubleshooting)  
@@ -359,13 +359,13 @@ bash prep_node_env.sh
 
 ## 8) Install PM2 Backend API Service (`pm2_service`)
 
-# Running the TradeBidder backend with PM2 + systemd
+### Running the TradeBidder backend with PM2 + systemd
 
 The backend is supervised by [PM2](https://pm2.keymetrics.io/) with a generated systemd unit for the `tradebid` user.
 
 ---
 
-# i. Start the ecosystem (as `tradebid`)
+**i. Start the ecosystem (as `tradebid`)**
 
 ```bash
 pm2 start ecosystem.config.cjs
@@ -382,7 +382,7 @@ sudo env PATH=$PATH:/home/tradebid/.nvm/versions/node/v22.19.0/bin \
 
 ---
 
-# ii. Register the systemd service (as `root`)
+**ii. Register the systemd service (as `root`)**
 
 Run the printed command exactly, e.g.:
 
@@ -396,7 +396,7 @@ This creates `/etc/systemd/system/pm2-tradebid.service`.
 
 ---
 
-# iii. Save process list (as `tradebid`)
+**iii. Save process list (as `tradebid`)**
 
 ```bash
 pm2 save
@@ -406,7 +406,7 @@ This ensures your ecosystem restarts automatically on boot.
 
 ---
 
-# iv. Manage the service (as `root`)
+**iv. Manage the service (as `root`)**
 
 ```bash
 # Check service status
