@@ -1,0 +1,276 @@
+VERSION=6.12
+
+cat << EOF > /usr/src/answers.cfg
+# --- CPU / Scheduler ---
+CONFIG_EXPERT=y
+CONFIG_EMBEDDED=y
+CONFIG_64BIT=y
+CONFIG_SMP=y
+CONFIG_MCORE2=y
+CONFIG_NUMA=y
+CONFIG_NUMA_BALANCING=y
+CONFIG_SCHED_SMT=y
+CONFIG_SCHED_MC=y
+CONFIG_PREEMPT_NONE=y
+# CONFIG_PREEMPT is not set
+# CONFIG_PREEMPT_VOLUNTARY is not set
+# CONFIG_PREEMPT_DYNAMIC is not set
+CONFIG_NO_HZ_IDLE=y
+CONFIG_HZ_250=y
+# CONFIG_HZ_100 is not set
+# CONFIG_HZ_300 is not set
+# CONFIG_HZ_1000 is not set
+CONFIG_JUMP_LABEL=y
+
+# --- Memory / VM ---
+CONFIG_TRANSPARENT_HUGEPAGE=y
+CONFIG_TRANSPARENT_HUGEPAGE_MADVISE=y
+CONFIG_HUGETLBFS=y
+CONFIG_HUGETLB_PAGE=y
+CONFIG_COMPACTION=y
+CONFIG_SLAB_FREELIST_HARDENED=y
+CONFIG_SLAB_FREELIST_RANDOM=y
+CONFIG_SHUFFLE_PAGE_ALLOCATOR=y
+CONFIG_LRU_GEN=y
+CONFIG_LRU_GEN_ENABLED=y
+# CONFIG_KSM is not set
+
+# --- IOMMU / PCIe ---
+CONFIG_IOMMU_SUPPORT=y
+CONFIG_INTEL_IOMMU=y
+CONFIG_IOMMU_DEFAULT_DMA_STRICT=y
+CONFIG_SWIOTLB_DYNAMIC=y
+CONFIG_PCIEPORTBUS=y
+CONFIG_PCIEAER=y
+CONFIG_PCIE_ECRC=y
+
+# --- Reliability / CPU features ---
+CONFIG_X86_MCE=y
+CONFIG_X86_MCE_INTEL=y
+
+# --- Init / Device Mgmt ---
+CONFIG_BLK_DEV_INITRD=y
+CONFIG_DEVTMPFS=y
+CONFIG_DEVTMPFS_MOUNT=y
+
+# --- Storage ---
+CONFIG_BLK_DEV_NVME=y
+CONFIG_SCSI=y
+CONFIG_SCSI_SAS_LIBSAS=y
+CONFIG_SCSI_SAS_ATA=y
+CONFIG_SCSI_SCAN_ASYNC=y
+CONFIG_BLK_DEV_SD=y
+CONFIG_ATA=y
+CONFIG_SATA_AHCI=y
+CONFIG_CHR_DEV_SG=m
+CONFIG_ENCLOSURE_SERVICES=m
+CONFIG_SCSI_ENCLOSURE=m
+CONFIG_SCSI_MEGARAID_SAS=m
+# CONFIG_MD is not set
+# CONFIG_BLK_DEV_MD is not set
+# CONFIG_DM is not set
+# CONFIG_DM_RAID is not set
+# CONFIG_DM_MIRROR is not set
+# CONFIG_DM_ZERO is not set
+# CONFIG_SCSI_FC_ATTRS is not set
+# CONFIG_LIBFC is not set
+# CONFIG_LIBFCOE is not set
+
+# --- Networking ---
+CONFIG_NET=y
+CONFIG_INET=y
+CONFIG_IPV6=y
+CONFIG_BONDING=y
+CONFIG_NET_SCH_FQ=y
+CONFIG_NET_SCH_FQ_CODEL=y
+CONFIG_CLS_U32=y
+CONFIG_BPF=y
+CONFIG_BPF_SYSCALL=y
+CONFIG_BPF_JIT=y
+CONFIG_BPF_JIT_ALWAYS_ON=y
+CONFIG_BPF_JIT_HARDEN=y
+CONFIG_BPF_UNPRIV_DEFAULT_OFF=y
+CONFIG_TLS=y
+# CONFIG_TLS_DEVICE is not set
+CONFIG_VLAN_8021Q=m
+CONFIG_TG3=m
+
+# --- USB / Input / HID ---
+CONFIG_USB=y
+CONFIG_USB_EHCI_HCD=y
+CONFIG_USB_EHCI_PCI=y
+CONFIG_USB_UHCI_HCD=y
+# CONFIG_USB_XHCI_HCD is not set
+# CONFIG_USB_UAS is not set
+CONFIG_USB_STORAGE=m
+CONFIG_HID=y
+CONFIG_HID_GENERIC=m
+CONFIG_USB_HID=m
+CONFIG_INPUT=y
+CONFIG_INPUT_KEYBOARD=y
+
+# --- Console / Graphics ---
+CONFIG_VT=y
+CONFIG_VGA_CONSOLE=y
+CONFIG_FB=y
+CONFIG_FRAMEBUFFER_CONSOLE=y
+CONFIG_DRM=y
+CONFIG_FB_SIMPLE=y
+CONFIG_DRM_MGAG200=m
+CONFIG_SERIAL_8250=y
+CONFIG_SERIAL_8250_CONSOLE=y
+
+# --- Filesystems ---
+CONFIG_EXT4_FS=y
+CONFIG_EXT4_USE_FOR_EXT2=y
+CONFIG_MSDOS_FS=m
+CONFIG_VFAT_FS=m
+CONFIG_NLS=y
+CONFIG_NLS_CODEPAGE_437=m
+CONFIG_NLS_ISO8859_1=m
+# CONFIG_BTRFS_FS is not set
+# CONFIG_XFS_FS is not set
+# CONFIG_F2FS_FS is not set
+# CONFIG_NTFS3_FS is not set
+# CONFIG_EXFAT_FS is not set
+
+# --- EFI / Boot ---
+CONFIG_EFI=y
+CONFIG_EFI_STUB=y
+CONFIG_EFI_PARTITION=y
+CONFIG_EFIVAR_FS=y
+
+# --- Security / Hardening ---
+CONFIG_SPECULATION_MITIGATIONS=y
+CONFIG_PAGE_TABLE_ISOLATION=y
+CONFIG_X86_SMEP=y
+CONFIG_X86_SMAP=y
+CONFIG_RANDOMIZE_BASE=y
+CONFIG_RANDOMIZE_KSTACK_OFFSET=y
+# CONFIG_RANDOMIZE_KSTACK_OFFSET_DEFAULT is not set
+CONFIG_VMAP_STACK=y
+CONFIG_STACKPROTECTOR=y
+CONFIG_STACKPROTECTOR_STRONG=y
+CONFIG_STRICT_KERNEL_RWX=y
+CONFIG_FORTIFY_SOURCE=y
+CONFIG_HARDENED_USERCOPY=y
+CONFIG_REFCOUNT_FULL=y
+CONFIG_SECCOMP=y
+CONFIG_SECCOMP_FILTER=y
+CONFIG_STRICT_DEVMEM=y
+# CONFIG_DEVKMEM is not set
+# CONFIG_USER_NS is not set
+CONFIG_LEGACY_VSYSCALL_XONLY=y
+CONFIG_UNWINDER_FRAME_POINTER=y
+# CONFIG_UNWINDER_ORC is not set
+CONFIG_IO_DELAY_0X80=y
+# CONFIG_IO_DELAY_0XED is not set
+# CONFIG_IO_DELAY_UDELAY is not set
+# CONFIG_IO_DELAY_NONE is not set
+# CONFIG_X86_5LEVEL is not set
+# CONFIG_IA32_EMULATION is not set
+# CONFIG_X86_KERNEL_IBT is not set
+# CONFIG_X86_INTEL_MEMORY_PROTECTION_KEYS is not set
+# CONFIG_X86_MSR is not set
+# CONFIG_X86_CPUID is not set
+# CONFIG_AUDIT is not set
+# CONFIG_KEXEC is not set
+# CONFIG_KEXEC_FILE is not set
+
+# --- Core Facilities ---
+CONFIG_PROC_FS=y
+CONFIG_SYSFS=y
+CONFIG_TMPFS=y
+CONFIG_KMOD=y
+CONFIG_MODULES=y
+CONFIG_KALLSYMS=y
+CONFIG_FW_LOADER=y
+CONFIG_PARTITION_ADVANCED=y
+CONFIG_EFI_PARTITION=y
+
+# --- Compression / CRC / Crypto ---
+CONFIG_KERNEL_ZSTD=y
+CONFIG_RD_ZSTD=y
+CONFIG_INITRAMFS_COMPRESSION_ZSTD=y
+CONFIG_CRC32=y
+CONFIG_CRC32_SLICEBY8=y
+# CONFIG_CRC32_SLICEBY4 is not set
+# CONFIG_CRC32_SARWATE is not set
+# CONFIG_CRC32_BIT is not set
+CONFIG_CRYPTO=y
+CONFIG_CRYPTO_AEAD=y
+CONFIG_CRYPTO_AES=y
+CONFIG_CRYPTO_GCM=y
+CONFIG_CRYPTO_SHA256=y
+
+# --- LTO / Compiler ---
+# CONFIG_LTO_NONE is not set
+# CONFIG_LTO_CLANG_FULL is not set
+CONFIG_LTO_CLANG_THIN=y
+# CONFIG_CFI_CLANG is not set
+# CONFIG_INIT_STACK_ALL_ZERO is not set
+
+# --- Monitoring / Sensors ---
+CONFIG_WATCHDOG=y
+CONFIG_HWMON=y
+CONFIG_THERMAL=y
+CONFIG_ACPI=y
+CONFIG_WMI=y
+CONFIG_ACPI_WMI=y
+CONFIG_DMI=y
+CONFIG_X86_PKG_TEMP_THERMAL=m
+CONFIG_SENSORS_CORETEMP=m
+CONFIG_ITCO_WDT=m
+CONFIG_HW_RANDOM=y
+CONFIG_HW_RANDOM_INTEL=m
+CONFIG_DELL_SMBIOS=m
+EOF
+
+echo ""
+echo "# Capture current modules..."
+lsmod > /usr/src/lsmod_$(uname -r)
+
+echo "# Setup the build env and tools..."
+apt update
+
+# Toolchain + build requirements
+apt -t bookworm-backports install -y \
+  build-essential gcc g++ binutils \
+  clang llvm make git \
+  libncurses-dev flex bison \
+  libelf-dev libssl-dev \
+  fakeroot devscripts debhelper-compat
+
+# Pull kernel build-deps from Debian’s control file
+apt -t bookworm-backports build-dep -y linux
+
+# Kernel source tarball
+apt -t bookworm-backports install -y linux-source
+
+echo "# Extract source..."
+tar -xvf /usr/src/linux-source-${VERSION}.tar.xz -C /usr/src/
+
+echo "# Create config..."
+cd /usr/src/linux-source-${VERSION}
+cp -v /boot/config-$(uname -r) .config
+
+echo "# Apply policy..."
+make olddefconfig KCONFIG_ALLCONFIG=/usr/src/answers.cfg
+
+echo "# Capture loaded modules..."
+lsmod > /usr/src/lsmod_$(uname -r)
+
+echo "# Prune to locally loaded modules..."
+yes "" | make LSMOD=/usr/src/lsmod_$(uname -r) localmodconfig
+
+echo "# Generic switches..."
+scripts/config --disable DEBUG_INFO
+scripts/config --enable MODULES
+
+echo "# Re-apply policy guarantees..."
+make olddefconfig KCONFIG_ALLCONFIG=/usr/src/answers.cfg
+
+
+echo "# Building..."
+skipdbg=skipdbg skipmodules=skipmodules make -j$(nproc) bindeb-pkg
+
