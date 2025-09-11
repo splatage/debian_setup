@@ -279,6 +279,14 @@ scripts/config --enable MODULES
 # 3. Apply strict policy baseline
 make olddefconfig KCONFIG_ALLCONFIG=/usr/src/answers.cfg
 
-# 4. Build
-make -j$(nproc) bindeb-pkg
+# --- Package naming ---
+CUSTOM_DATE="$(date +%Y%m%d-%H%M)"   # e.g. 20250911-1542
+LOCALTAG="+tb"                       # short uname suffix
+
+echo "# Building kernel with version tag ${LOCALTAG}, package version ~tb${CUSTOM_DATE}..."
+
+make -j"$(nproc)" \
+  LOCALVERSION="${LOCALTAG}" \
+  KDEB_PKGVERSION="1~tb${CUSTOM_DATE}" \
+  bindeb-pkg
 
