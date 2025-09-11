@@ -360,19 +360,43 @@ bash prep_node_env.sh
 ## 8) Install PM2 Backend API Service (`pm2_service_install.sh`)
 
 ### Details
-- **Purpose:** writes a **skeleton** systemd unit `tradebidder-backend.service` for a PM2-managed Node.js app in `/home/tradebid/tradebidder/backend`.
-- **Placeholders:** the unit content in the script contains an ellipsis (`...`). You must add the appropriate `ExecStart`/`ExecStop` lines for PM2 (e.g., `pm2 start ecosystem.config.cjs --update-env` and `pm2 resurrect`) before enabling.
-- **Environment:** hard-codes Node path to `~/.nvm/versions/node/v22.19.0/bin`, sets `NODE_ENV=production` and `PM2_HOME=/home/tradebid/.pm2`.
-- **Order:** wants `network-online.target`, `redis-server.service`, and `mariadb.service|mysql.service`.
-
-**After editing the unit:** run `systemctl daemon-reload && systemctl enable --now tradebidder-backend.service` and inspect logs with `journalctl -u tradebidder-backend.service -f`.
-
 **Purpose:** Sets up PM2 cluster manager as a service.
 
 **Run:**
 ```bash
-curl -O https://raw.githubusercontent.com/splatage/debian_setup/refs/heads/main/pm2_service_install.sh
-bash pm2_service_install.sh
+############################################
+# Enable TradeBidder backend via PM2+systemd
+############################################
+
+# Generate a proper systemd service for the `tradebid` user
+sudo pm2 startup systemd -u tradebid --hp /home/tradebid
+
+# Switch to tradebid user and start backend ecosystem
+sudo -iu tradebid bash <<'EOSU'
+cd ~/tradebidder/backend
+
+# Launch the ecosystem (adjust path if needed)
+pm2 start ecosystem.config.cjs
+
+# Save process list so it auto-restores on reboot
+pm2 save
+EOSU
+
+# Enable + start the pm2-tradebid service
+sudo systemctl daemon-reload
+sudo systemctl enable pm2-tradebid
+sudo systemctl start pm2-tradebid
+
+############################################
+# Quick checks
+############################################
+
+# View service status
+systemctl status pm2-tradebid
+
+# Tail logs
+journalctl -u pm2-tradebid -f
+
 ```
 
 ---
