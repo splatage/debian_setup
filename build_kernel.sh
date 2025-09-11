@@ -224,6 +224,23 @@ CONFIG_ITCO_WDT=m
 CONFIG_HW_RANDOM=y
 CONFIG_HW_RANDOM_INTEL=m
 CONFIG_DELL_SMBIOS=m
+
+# --- Convenience / self-audit ---
+CONFIG_IKCONFIG=y
+CONFIG_IKCONFIG_PROC=y
+
+# --- Timers / scheduling ---
+CONFIG_HIGH_RES_TIMERS=y
+CONFIG_SCHED_CORE=y        # Core scheduling for SMT (if present)
+
+# --- Microcode (the initrd will feed it) ---
+CONFIG_MICROCODE=y
+CONFIG_MICROCODE_INTEL=y
+# CONFIG_MICROCODE_AMD is not set
+
+# --- Optional / often present on modern boards ---
+# USB 3 host (enable unless you truly have no xHCI anywhere)
+CONFIG_USB_XHCI_HCD=y
 EOF
 
 echo ""
