@@ -98,26 +98,6 @@ zpool status
 zfs list
 lsblk -f
 ```
-## 1.A) Hardened Kernel
-**Purpose:** Recomplie the backports kernel for performance and security
-```bash
-curl -O https://raw.githubusercontent.com/splatage/debian_setup/refs/heads/main/build_kernel.sh
-bash build_kernel.sh
-```
-
-The resulting deb files will be in /usr/src:
-
-```bash
-dpkg -i ...deb
-update-grub
-```
-
-**Reboot to use the new kernel**
-Verify with
-
-```bash
-uname -a
-```
 
 ---
 
@@ -179,7 +159,6 @@ search local.domain
 nameserver <dns_srver>
 nameserver <dns_server>
 ```
-
 ---
 
 ## 2) MariaDB Cluster Controller (`mariadb_cluster_controller.sh`)
@@ -310,32 +289,32 @@ bash pm2_service_install.sh
 ---
 
 ## 8) Install and Build Custom Kernel Image (`kernel`)
-**Purpose** To build a minimal, custom kernel
-**Run (as root) on the target machine:**
+**Purpose:** Recomplie the backports kernel for performance and security hardening
 ```bash
-curl -O https://raw.githubusercontent.com/splatage/debian_setup/refs/heads/main/kernel-tool.sh
-bash kernel-tool.sh plan
-bash kernel-tool.sh fetch
-bash kernel-tool.sh config
-bash kernel-tool.sh build
-bash kernel-tool.sh install
+curl -O https://raw.githubusercontent.com/splatage/debian_setup/refs/heads/main/build_kernel.sh
+bash build_kernel.sh
 ```
 
-**Optional: prebuilt ZFS (no DKMS)**
+The resulting deb files will be in /usr/src:
+
 ```bash
-bash kernel-tool.sh package-zfs
+dpkg -i ...deb
+update-grub
 ```
 
-**Optional: DKMS path instead of prebuilt**
+**Reboot to use the new kernel**
+Verify with
+
 ```bash
-bash kernel-tool.sh zfs-dkms
+uname -a
 ```
 
-
-**Reboot into the new kernel, then:**
+## 9) User Management (`users`)
+**Purpose:** To provision and enforce user key access
 
 ```bash
-bash kernel-tool.sh verify
+curl -O https://raw.githubusercontent.com/splatage/debian_setup/refs/heads/main/enforce-ssh-keys.sh
+bash enforce-ssh-keys.sh
 ```
 
 ---
