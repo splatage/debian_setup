@@ -285,7 +285,7 @@ bash enforce-ssh-keys.sh
 **Run:**
 ```bash
 curl -O https://raw.githubusercontent.com/splatage/debian_setup/refs/heads/main/prep_node_env.sh
-bash prep_node_env.sh
+bash prep_node_env.sh --user tradebid
 ```
 
 ---
