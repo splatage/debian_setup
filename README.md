@@ -357,46 +357,63 @@ bash prep_node_env.sh
 
 ---
 
-## 8) Install PM2 Backend API Service (`pm2_service_install.sh`)
+## 8) Install PM2 Backend API Service (`pm2_service`)
 
-### Details
-**Purpose:** Sets up PM2 cluster manager as a service.
+# Running the TradeBidder backend with PM2 + systemd
 
-**Run:**
+The backend is supervised by [PM2](https://pm2.keymetrics.io/) with a generated systemd unit for the `tradebid` user.
+
+---
+
+# i. Start the ecosystem (as `tradebid`)
+
 ```bash
-############################################
-# Enable TradeBidder backend via PM2+systemd
-############################################
-
-# Generate a proper systemd service for the `tradebid` user
-sudo pm2 startup systemd -u tradebid --hp /home/tradebid
-
-# Switch to tradebid user and start backend ecosystem
-sudo -iu tradebid bash <<'EOSU'
-cd ~/tradebidder/backend
-
-# Launch the ecosystem (adjust path if needed)
 pm2 start ecosystem.config.cjs
+pm2 startup
+```
 
-# Save process list so it auto-restores on reboot
+PM2 will print a command like:
+
+```bash
+sudo env PATH=$PATH:/home/tradebid/.nvm/versions/node/v22.19.0/bin \
+  /home/tradebid/.nvm/versions/node/v22.19.0/lib/node_modules/pm2/bin/pm2 \
+  startup systemd -u tradebid --hp /home/tradebid
+```
+
+---
+
+# ii. Register the systemd service (as `root`)
+
+Run the printed command exactly, e.g.:
+
+```bash
+env PATH=$PATH:/home/tradebid/.nvm/versions/node/v22.19.0/bin \
+  /home/tradebid/.nvm/versions/node/v22.19.0/lib/node_modules/pm2/bin/pm2 \
+  startup systemd -u tradebid --hp /home/tradebid
+```
+
+This creates `/etc/systemd/system/pm2-tradebid.service`.
+
+---
+
+# iii. Save process list (as `tradebid`)
+
+```bash
 pm2 save
-EOSU
+```
 
-# Enable + start the pm2-tradebid service
-sudo systemctl daemon-reload
-sudo systemctl enable pm2-tradebid
-sudo systemctl start pm2-tradebid
+This ensures your ecosystem restarts automatically on boot.
 
-############################################
-# Quick checks
-############################################
+---
 
-# View service status
+# iv. Manage the service (as `root`)
+
+```bash
+# Check service status
 systemctl status pm2-tradebid
 
-# Tail logs
+# Follow logs in real time
 journalctl -u pm2-tradebid -f
-
 ```
 
 ---
