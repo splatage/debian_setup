@@ -247,6 +247,8 @@ echo ""
 echo "# Capture current modules..."
 lsmod > /usr/src/lsmod_$(uname -r)
 
+echo "# Enable backports..."
+echo "deb http://deb.debian.org/debian bookworm-backports main contrib non-free-firmware" > /etc/apt/sources.list.d/debian-12-backports.list
 echo "# Setup the build env and tools..."
 apt update
 
